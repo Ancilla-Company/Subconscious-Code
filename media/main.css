@@ -1,0 +1,235 @@
+:root {
+  color-scheme: light dark;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  box-sizing: border-box;
+  background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+  color: var(--vscode-sideBar-foreground, var(--vscode-foreground));
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+}
+
+/* ── Messages ────────────────────────────────────────────────────────── */
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 12px 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.bubble {
+  max-width: 90%;
+  padding: 6px 10px;
+  border-radius: 8px;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  line-height: 1.45;
+}
+
+.bubble.agent {
+  align-self: stretch;
+  max-width: 100%;
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.bubble.user {
+  align-self: flex-end;
+  background: var(--vscode-list-hoverBackground);
+  border: 1px solid var(--vscode-input-border, transparent);
+}
+
+.status {
+  padding: 0 12px;
+  min-height: 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+}
+.status:empty {
+  display: none;
+}
+
+/* ── Composer ────────────────────────────────────────────────────────── */
+.composer {
+  padding: 8px;
+}
+
+.composer-box {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+  border-radius: 6px;
+  background: var(--vscode-input-background);
+  transition: border-color 0.1s ease-in-out;
+}
+.composer-box:focus-within {
+  border-color: var(--vscode-focusBorder);
+}
+
+.composer-box textarea {
+  border: none;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: var(--vscode-input-foreground);
+  font-family: inherit;
+  font-size: inherit;
+  line-height: 1.4;
+  padding: 8px 10px 4px;
+  max-height: 200px;
+}
+.composer-box textarea::placeholder {
+  color: var(--vscode-input-placeholderForeground);
+}
+
+/* Single-line control row: pickers on the left, send on the right. */
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 3px 6px 5px;
+}
+
+/* Workspace / thread / new-thread on one line beneath the composer box. */
+.selectors {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 2px 0;
+  min-width: 0;
+}
+.selectors .picker {
+  max-width: 42%;
+}
+
+.pickers {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* Pill dropdown: icon + label + chevron combined in one element. */
+.picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 44%;
+  border: none;
+  background: transparent;
+  color: var(--vscode-foreground);
+  font-family: inherit;
+  font-size: 0.9em;
+  padding: 3px 5px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.picker:hover {
+  background: var(--vscode-toolbar-hoverBackground);
+}
+.picker .ico {
+  flex: 0 0 auto;
+  opacity: 0.85;
+}
+.picker .picker-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.picker .chevron {
+  flex: 0 0 auto;
+  opacity: 0.7;
+}
+
+/* ── Icon / send buttons ──────────────────────────────────────────────── */
+.icon-btn,
+.send-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 4px;
+  background: transparent;
+  color: var(--vscode-foreground);
+}
+.icon-btn:hover {
+  background: var(--vscode-toolbar-hoverBackground);
+}
+
+.send-btn {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+  border-radius: 5px;
+  padding: 4px 7px;
+}
+.send-btn:hover {
+  background: var(--vscode-button-hoverBackground);
+}
+.send-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ── Popup menu ───────────────────────────────────────────────────────── */
+.menu {
+  position: fixed;
+  z-index: 100;
+  min-width: 160px;
+  max-width: 90vw;
+  padding: 4px;
+  background: var(--vscode-menu-background, var(--vscode-dropdown-background));
+  color: var(--vscode-menu-foreground, var(--vscode-dropdown-foreground));
+  border: 1px solid var(--vscode-menu-border, var(--vscode-widget-border, transparent));
+  border-radius: 6px;
+  box-shadow: 0 4px 12px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.36));
+}
+.menu[hidden] {
+  display: none;
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: 0.95em;
+  text-align: left;
+  padding: 5px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.menu-item:hover,
+.menu-item.selected {
+  background: var(--vscode-menu-selectionBackground, var(--vscode-list-activeSelectionBackground));
+  color: var(--vscode-menu-selectionForeground, var(--vscode-list-activeSelectionForeground));
+}
+.menu-item svg {
+  flex: 0 0 auto;
+  opacity: 0.85;
+}
+.menu-item-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.menu-empty {
+  padding: 6px 8px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.9em;
+}

@@ -1,0 +1,89 @@
+{
+  "name": "subconscious-code",
+  "displayName": "Subconscious Code",
+  "description": "Coding-focused chat for the Subconscious engine. Shares workspaces and threads with the Subconscious desktop app.",
+  "version": "0.0.1",
+  "publisher": "ancilla",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Chat"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "subconscious",
+          "title": "Subconscious",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "subconscious": [
+        {
+          "id": "subconscious.chat",
+          "name": "Code",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "subconscious.reconnect",
+        "title": "Subconscious: Reconnect to Engine"
+      },
+      {
+        "command": "subconscious.newThread",
+        "title": "Subconscious: New Thread"
+      },
+      {
+        "command": "subconscious.selectWorkspace",
+        "title": "Subconscious: Select Workspace"
+      }
+    ],
+    "configuration": {
+      "title": "Subconscious Code",
+      "properties": {
+        "subconscious.autoStartEngine": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically start the Subconscious engine if it isn't already running."
+        },
+        "subconscious.engineCommand": {
+          "type": "string",
+          "default": "subconscious",
+          "description": "Command used to launch the Subconscious engine (must be on PATH)."
+        },
+        "subconscious.dev": {
+          "type": "boolean",
+          "default": false,
+          "description": "Connect to the development engine instance (uses the '-dev' data directory and passes --dev when spawning)."
+        },
+        "subconscious.dataDir": {
+          "type": "string",
+          "default": "",
+          "description": "Override the Subconscious data directory used to discover the engine (leave blank for the platform default)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@types/ws": "^8.5.10",
+    "typescript": "^5.4.0"
+  }
+}

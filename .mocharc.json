@@ -1,0 +1,8 @@
+{
+  "spec": ["out/**/*.test.js"],
+  "ignore": ["out/**/*.vscode.test.js"],
+  "require": ["out/test/setup.js"],
+  "reporter": "spec",
+  "timeout": 20000,
+  "color": true
+}

@@ -4,7 +4,44 @@ import WebSocket from "ws";
 import {
   RuntimeInfo, Workspace, Thread, Message, ModelConfig, WSFrame,
 } from "./types";
+import type { ToolCallFrame, ProfileSetFrame } from "../tools/types";
+import type { ExecutionProfile } from "../env/types";
 import { discoverEngine } from "./discovery";
+
+/** Wire-envelope version stamped on outgoing frames the client originates. */
+const FRAME_VERSION = 1;
+
+/**
+ * The minimal surface of the `ToolHost` that {@link EngineClient} routes tool RPC to.
+ * Kept structural so the engine layer does not depend on the concrete `ToolHost`
+ * (and does not pull `vscode` into its unit tests); the wiring layer supplies the
+ * real host, which already exposes `handleCall` and `sendRegistration`.
+ */
+export interface ToolCallRouter {
+  /** Handle an inbound `tool.call` frame (never throws; replies with a `tool.result`). */
+  handleCall(frame: ToolCallFrame): void | Promise<void>;
+  /** Build and send the current `tool.register` frame (skips when the socket is closed). */
+  sendRegistration(): void;
+}
+
+/**
+ * A subscribe-only change event. Structurally compatible with `vscode.Event<void>`
+ * (as exposed by `ToolRegistry.onDidChange`), so the registry's event can be passed
+ * directly without the engine layer importing `vscode`.
+ */
+export type ChangeSubscribe = (listener: () => void) => { dispose(): void };
+
+/**
+ * Supplies the currently selected default model id. Applied to `chat.send` frames
+ * that do not override the model (Requirement 8.7).
+ */
+export type DefaultModelProvider = () => string | null | undefined;
+
+/**
+ * Supplies the current workspace execution profile to advertise to the engine on
+ * connect (Requirement 11.5) and on edit (Requirement 11.8).
+ */
+export type ExecutionProfileProvider = () => ExecutionProfile | undefined;
 
 /**
  * Client for the local Subconscious engine API.
@@ -14,11 +51,26 @@ import { discoverEngine } from "./discovery";
  * Emits:
  *   - "event"   (frame)  every inbound frame
  *   - "status"  ("connected" | "disconnected")
+ *
+ * The client also carries the agent tool-callback contract: it satisfies the
+ * `ToolFrameTransport` surface ({@link send} / {@link isOpen}) that `ToolHost`
+ * writes through, routes inbound `tool.call` frames to an attached
+ * {@link ToolCallRouter}, (re-)sends tool registration on every connection and on
+ * registry change, and supplies the execution profile via a `profile.set` frame.
  */
 export class EngineClient extends EventEmitter {
   private info?: RuntimeInfo;
   private ws?: WebSocket;
   private closing = false;
+
+  /** Attached tool-callback router; inbound `tool.call` frames are dispatched here. */
+  private toolHost?: ToolCallRouter;
+  /** Subscription to the tool registry's change event (re-register on change). */
+  private registryChangeSub?: { dispose(): void };
+  /** Provides the default model id applied to un-overridden `chat.send` frames. */
+  private defaultModelProvider?: DefaultModelProvider;
+  /** Provides the execution profile advertised to the engine on connect. */
+  private profileProvider?: ExecutionProfileProvider;
 
   get baseUrl(): string {
     if (!this.info) {
@@ -43,15 +95,25 @@ export class EngineClient extends EventEmitter {
 
       ws.on("open", () => {
         this.emit("status", "connected");
+        this.onConnected();
         resolve();
       });
       ws.on("message", (raw) => {
+        let frame: WSFrame;
         try {
-          const frame = JSON.parse(raw.toString()) as WSFrame;
-          this.emit("event", frame);
+          frame = JSON.parse(raw.toString()) as WSFrame;
         } catch {
-          /* ignore malformed frame */
+          return; /* ignore malformed frame */
         }
+        // Route engine→ext tool-callback RPC to the attached ToolHost (R3.1). The
+        // frame is still emitted as an "event" for observers; no UI listener acts on
+        // `tool.call`, so this is side-effect free for the chat view.
+        if (frame.type === "tool.call" && this.toolHost !== undefined) {
+          void Promise.resolve(
+            this.toolHost.handleCall(frame as ToolCallFrame),
+          ).catch(() => undefined);
+        }
+        this.emit("event", frame);
       });
       ws.on("error", (err) => reject(err));
       ws.on("close", () => {
@@ -66,8 +128,81 @@ export class EngineClient extends EventEmitter {
 
   dispose(): void {
     this.closing = true;
+    this.registryChangeSub?.dispose();
+    this.registryChangeSub = undefined;
     this.ws?.close();
     this.ws = undefined;
+  }
+
+  // ── Agent tool-callback wiring ───────────────────────────────────────────────
+
+  /**
+   * Attach the tool-callback router and subscribe to the registry's change event.
+   *
+   * Inbound `tool.call` frames are routed to `host.handleCall`. Registration is
+   * (re-)sent on every `connected` transition (Requirement 2.1, 2.4) and whenever the
+   * enabled set changes (Requirement 2.2). When the socket is closed, `sendRegistration`
+   * is a no-op and the registry retains the enabled set, so the next `connected`
+   * transition re-sends the current set (Requirement 2.6).
+   *
+   * @param host            The tool-callback router (the concrete `ToolHost`).
+   * @param onRegistryChange The registry's `onDidChange` subscribe function.
+   */
+  attachToolHost(host: ToolCallRouter, onRegistryChange: ChangeSubscribe): void {
+    this.toolHost = host;
+    this.registryChangeSub?.dispose();
+    this.registryChangeSub = onRegistryChange(() => host.sendRegistration());
+  }
+
+  /** Set the provider of the default model id for un-overridden `chat.send` frames (R8.7). */
+  setDefaultModelProvider(provider: DefaultModelProvider): void {
+    this.defaultModelProvider = provider;
+  }
+
+  /** Set the provider of the execution profile advertised on connect (R11.5). */
+  setExecutionProfileProvider(provider: ExecutionProfileProvider): void {
+    this.profileProvider = provider;
+  }
+
+  /** Whether the WebSocket is currently open (part of the `ToolFrameTransport` surface). */
+  isOpen(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN;
+  }
+
+  /**
+   * Send a frame over the WebSocket when it is open; a send attempted while the
+   * socket is closed is silently dropped (the caller retries on reconnect). This is
+   * the single outbound write path and the `ToolFrameTransport.send` implementation.
+   */
+  send(frame: WSFrame): void {
+    if (this.isOpen()) {
+      this.ws!.send(JSON.stringify(frame));
+    }
+  }
+
+  /**
+   * Supply the current execution profile to the engine (Requirement 11.5, 11.8).
+   * Sent on connect and whenever the profile is edited.
+   */
+  sendProfile(profile: ExecutionProfile): void {
+    const frame: ProfileSetFrame = {
+      v: FRAME_VERSION,
+      type: "profile.set",
+      data: { profile },
+    };
+    this.send(frame);
+  }
+
+  /**
+   * Run on every successful `connected` transition: re-register the enabled tool set
+   * (R2.1, R2.4, R2.6) and advertise the current execution profile (R11.5).
+   */
+  private onConnected(): void {
+    this.toolHost?.sendRegistration();
+    const profile = this.profileProvider?.();
+    if (profile !== undefined) {
+      this.sendProfile(profile);
+    }
   }
 
   // ── REST ───────────────────────────────────────────────────────────────────
@@ -110,15 +245,22 @@ export class EngineClient extends EventEmitter {
   }
 
   // ── Chat (WebSocket) ─────────────────────────────────────────────────────────
-  /** Send a user message; assistant deltas arrive as "event" frames (chat.delta). */
+  /**
+   * Send a user message; assistant deltas arrive as "event" frames (chat.delta).
+   *
+   * When the caller does not supply a `modelId`, the selected default model id (from
+   * the attached {@link DefaultModelProvider}) is applied to the outgoing frame; an
+   * explicit `modelId` always overrides the default (Requirement 8.7).
+   */
   sendChat(threadUuid: string, content: string, modelId?: string): string {
     const id = randomUUID();
     const data: Record<string, unknown> = { thread_uuid: threadUuid, content };
-    if (modelId) {
-      data.model_id = modelId;
+    const effectiveModelId = modelId ?? this.defaultModelProvider?.() ?? undefined;
+    if (effectiveModelId) {
+      data.model_id = effectiveModelId;
     }
-    const frame: WSFrame = { v: 1, type: "chat.send", id, data };
-    this.ws?.send(JSON.stringify(frame));
+    const frame: WSFrame = { v: FRAME_VERSION, type: "chat.send", id, data };
+    this.send(frame);
     return id;
   }
 }

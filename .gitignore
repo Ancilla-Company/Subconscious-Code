@@ -2,3 +2,5 @@ node_modules/
 out/
 *.vsix
 .vscode-test/
+media/highlight-bundle.js
+.kiro/specs/

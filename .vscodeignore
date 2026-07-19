@@ -1,5 +1,13 @@
 .vscode/**
+.vscode-test/**
+.vscode-test.mjs
+.mocharc.json
+scripts/**
 src/**
+media/src/**
+out/**/*.test.js
+out/**/*.test.js.map
+out/test/**
 **/*.ts
 **/tsconfig.json
 .gitignore

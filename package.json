@@ -5,7 +5,7 @@
   "version": "0.0.1",
   "publisher": "ancilla",
   "engines": {
-    "vscode": "^1.85.0"
+    "vscode": "^1.93.0"
   },
   "categories": [
     "Other",
@@ -19,7 +19,7 @@
         {
           "id": "subconscious",
           "title": "Subconscious",
-          "icon": "media/icon.svg"
+          "icon": "media/logo.svg"
         }
       ]
     },
@@ -28,6 +28,11 @@
         {
           "id": "subconscious.chat",
           "name": "Code",
+          "type": "webview"
+        },
+        {
+          "id": "subconscious.settings",
+          "name": "Settings",
           "type": "webview"
         }
       ]
@@ -44,11 +49,59 @@
       {
         "command": "subconscious.selectWorkspace",
         "title": "Subconscious: Select Workspace"
+      },
+      {
+        "command": "subconscious.configureTools",
+        "title": "Subconscious: Configure Tools",
+        "category": "Subconscious",
+        "icon": "$(tools)"
+      },
+      {
+        "command": "subconscious.setWorkingDirectory",
+        "title": "Subconscious: Set Working Directory",
+        "category": "Subconscious"
       }
     ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "subconscious.configureTools",
+          "when": "view == subconscious.chat",
+          "group": "navigation@1"
+        }
+      ]
+    },
     "configuration": {
       "title": "Subconscious Code",
       "properties": {
+        "subconscious.agent.autonomyMode": {
+          "type": "string",
+          "enum": [
+            "supervised",
+            "auto"
+          ],
+          "enumDescriptions": [
+            "Ask for confirmation before each mutating tool action.",
+            "Run eligible tools automatically without asking (autonomous)."
+          ],
+          "default": "supervised",
+          "description": "How the agent handles approvals for mutating tool actions. Comparable to the auto-approve posture in GitHub Copilot and Kiro."
+        },
+        "subconscious.tools.autoApprove": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically approve all tool invocations without confirmation. When enabled, overrides the autonomy mode to run autonomously (mirrors GitHub Copilot's chat.tools.autoApprove). Use with caution."
+        },
+        "subconscious.mcp.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Discover and host Model Context Protocol (MCP) servers declared in the workspace MCP configuration file, exposing their tools to the agent."
+        },
+        "subconscious.mcp.configFile": {
+          "type": "string",
+          "default": ".vscode/mcp.json",
+          "description": "Path to the MCP server configuration file (VS Code standard 'servers' format), relative to the workspace root or absolute."
+        },
         "subconscious.autoStartEngine": {
           "type": "boolean",
           "default": true,
@@ -68,22 +121,50 @@
           "type": "string",
           "default": "",
           "description": "Override the Subconscious data directory used to discover the engine (leave blank for the platform default)."
+        },
+        "subconscious.toolTimeoutSeconds": {
+          "type": "number",
+          "default": 120,
+          "minimum": 5,
+          "maximum": 600,
+          "description": "Maximum time, in seconds, a coding tool may run before the agent tool call times out (5–600 seconds)."
+        },
+        "subconscious.maxReadBytes": {
+          "type": "number",
+          "default": 10485760,
+          "minimum": 1024,
+          "maximum": 104857600,
+          "description": "Maximum number of bytes the read-file tool returns before the content is truncated (1,024–104,857,600 bytes)."
         }
       }
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
+    "vscode:prepublish": "npm run compile && npm run build:media",
     "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
+    "watch": "tsc -watch -p ./",
+    "build:media": "node ./scripts/build-media.js",
+    "pretest": "npm run compile",
+    "test": "node ./scripts/run-unit-tests.js",
+    "pretest:unit": "npm run compile",
+    "test:unit": "node ./scripts/run-unit-tests.js",
+    "pretest:host": "npm run compile",
+    "test:host": "vscode-test"
   },
   "dependencies": {
+    "highlight.js": "11.11.1",
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@types/mocha": "10.0.10",
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.85.0",
     "@types/ws": "^8.5.10",
+    "@vscode/test-cli": "0.0.15",
+    "@vscode/test-electron": "3.0.0",
+    "esbuild": "0.24.2",
+    "fast-check": "4.9.0",
+    "mocha": "11.7.6",
     "typescript": "^5.4.0"
   }
 }

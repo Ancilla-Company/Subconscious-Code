@@ -135,6 +135,22 @@
           "minimum": 1024,
           "maximum": 104857600,
           "description": "Maximum number of bytes the read-file tool returns before the content is truncated (1,024–104,857,600 bytes)."
+        },
+        "subconscious.trustedCommands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Glob-style command patterns ('*' matches any run of characters) that are auto-approved without confirmation for run_terminal/run_tests, evaluated against each decomposed command segment. Mirrors GitHub Copilot/Kiro-style trust lists, e.g. \"npm *\", \"git status\"."
+        },
+        "subconscious.commandDenylist": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Substring patterns that always force confirmation for a terminal command segment (case-insensitive). Checked before subconscious.trustedCommands, so a denylist match always wins, e.g. \"rm -rf\", \"git push\"."
         }
       }
     }

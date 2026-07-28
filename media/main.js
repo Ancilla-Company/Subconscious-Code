@@ -16,6 +16,8 @@
   const $configureTools = document.getElementById("configure-tools");
   const $list = document.getElementById("list");
   const $menu = document.getElementById("menu");
+  const $contextChips = document.getElementById("context-chips");
+  const $mentionMenu = document.getElementById("mention-menu");
 
   const state = {
     workspaces: [],
@@ -25,6 +27,9 @@
     currentThread: undefined,
     currentModel: undefined,
     view: "chat", // "chat" | "workspaces" | "threads"
+    // Resolved "#" context attachments queued for the next outgoing message.
+    // Each entry is { label, text }; `text` is what's actually sent to the engine.
+    contextItems: [],
   };
 
   // Set when the user picks a workspace from the list, so the arriving thread list is
@@ -249,7 +254,11 @@
   function renderMarkdown(src) {
     const lines = String(src == null ? "" : src).replace(/\r\n/g, "\n").split("\n");
     const blank = (l) => /^\s*$/.test(l);
-    const isFence = (l) => /^```/.test(l);
+    // Fences may be indented (e.g. when the model nests a code block inside a
+    // list item); detection, opening, and closing must all tolerate leading
+    // whitespace, otherwise an indented fence falls through to paragraph
+    // handling and the literal ```lang / ``` markers are shown as text.
+    const isFence = (l) => /^\s*```/.test(l);
     const isHeader = (l) => /^#{1,6}\s+/.test(l);
     const isRule = (l) => /^(-{3,}|\*{3,}|_{3,})\s*$/.test(l);
     const isQuote = (l) => /^>\s?/.test(l);
@@ -261,13 +270,17 @@
     while (i < lines.length) {
       const line = lines[i];
 
-      const fence = /^```(\w*)\s*$/.exec(line);
+      const fence = /^(\s*)```(\w*)\s*$/.exec(line);
       if (fence) {
-        const lang = fence[1];
+        const indent = fence[1].length;
+        const lang = fence[2];
         const code = [];
         i++;
-        while (i < lines.length && !/^```\s*$/.test(lines[i])) {
-          code.push(lines[i]);
+        while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) {
+          // Strip the fence's own indentation from each code line so an
+          // indented (e.g. list-nested) block isn't rendered with spurious
+          // leading spaces, while deeper indentation inside the block is kept.
+          code.push(indent > 0 ? lines[i].replace(new RegExp(`^\\s{0,${indent}}`), "") : lines[i]);
           i++;
         }
         i++; // closing fence
@@ -422,6 +435,297 @@
   function truncate(text, max) {
     if (!text) return "";
     return text.length > max ? text.slice(0, max - 1) + "…" : text;
+  }
+
+  // ── "#" context-mention popup ──────────────────────────────────────────
+  // Typing "#" in the composer opens a popup (Kiro/Antigravity-style) offering
+  // Files, Folders, Terminal, Problems, Git Diff, and Open Editors. Picking a
+  // searchable category (Files/Folders/Terminal) narrows to a live search;
+  // picking a fixed category resolves immediately. A resolved mention becomes a
+  // chip above the composer and its text is prepended to the next outgoing
+  // message (see the "send" message and ChatPanel.composeMessageWithContext).
+
+  const CAT_ICONS = {
+    file: '<path fill="currentColor" d="M4 1.5h5.4L12.5 4.6V13a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V2.5a1 1 0 0 1 1-1Zm5 .9V4.5h2.1L9 2.4Z"/>',
+    folder: FOLDER_ICON,
+    terminal:
+      '<path fill="currentColor" d="M1.5 3A1 1 0 0 1 2.5 2h11a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1V3Zm2 2.1 2.6 2.4-2.6 2.4.7.75 3.4-3.15L4.2 4.35l-.7.75Zm4.3 5.9h4v-.9h-4v.9Z"/>',
+    symbol:
+      '<path fill="currentColor" d="M5.7 2.1a.6.6 0 0 1 .77.35l3.9 10.4a.6.6 0 0 1-.35.77l-.94.35a.6.6 0 0 1-.77-.35l-3.9-10.4a.6.6 0 0 1 .35-.77l.94-.35Zm-3.4 3.1 2.1 2-2.1 2 .78.78L5.7 7.2 3.08 4.42l-.78.78Zm9.4 0 2.1 2-2.1 2 .78.78L14.1 7.2l-2.62-2.78-.78.78Z"/>',
+    problems:
+      '<path fill="currentColor" d="M8 1.5 14.5 13H1.5L8 1.5Zm0 3.9-4 6.9h8l-4-6.9ZM7.5 9h1v1.1h-1V9Zm0-3.2h1V8.2h-1V5.8Z"/>',
+    gitDiff:
+      '<path fill="currentColor" d="M4 2.2a1.8 1.8 0 1 1 0 3.6.6.6 0 0 0-.6.6v3.2a.6.6 0 0 0 .6.6 1.8 1.8 0 1 1 0 3.6 1.8 1.8 0 0 1-.9-3.36V5.96A1.8 1.8 0 0 1 4 2.2Zm8 5.5a1.8 1.8 0 1 1-1.8 1.8c0-.2.03-.4.09-.58L8.7 7.4a.6.6 0 0 1 .58-1h1.94A1.8 1.8 0 0 1 12 7.7Z"/>',
+    openEditors:
+      '<path fill="currentColor" d="M2.5 3h8A1 1 0 0 1 11.5 4v6a1 1 0 0 1-1 1h-8a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Zm2 6.5h6A1 1 0 0 0 11.5 12v0h-8v0a1 1 0 0 0 1 1.5Z"/>',
+  };
+
+  const mention = {
+    categories: null, // cached list from the extension, fetched once
+    open: false,
+    mode: "category", // "category" | "items"
+    anchorStart: -1, // index of the "#" that opened the current popup
+    category: undefined,
+    query: "",
+    items: [],
+    selected: 0,
+    searchSeq: 0,
+    latestSearchSeq: -1,
+    searchTimer: null,
+  };
+
+  function closeMentionMenu() {
+    mention.open = false;
+    mention.anchorStart = -1;
+    mention.items = [];
+    mention.selected = 0;
+    if (mention.searchTimer) {
+      clearTimeout(mention.searchTimer);
+      mention.searchTimer = null;
+    }
+    $mentionMenu.hidden = true;
+    $mentionMenu.innerHTML = "";
+  }
+
+  function positionMentionMenu() {
+    $mentionMenu.hidden = false;
+    const rect = $input.getBoundingClientRect();
+    const menuRect = $mentionMenu.getBoundingClientRect();
+    let left = rect.left;
+    const maxLeft = window.innerWidth - menuRect.width - 6;
+    if (left > maxLeft) left = Math.max(6, maxLeft);
+    $mentionMenu.style.left = `${left}px`;
+    $mentionMenu.style.top = `${rect.top - menuRect.height - 6}px`;
+  }
+
+  function renderMentionRows(rows) {
+    $mentionMenu.innerHTML = "";
+    if (rows.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "menu-empty";
+      empty.textContent = mention.mode === "items" ? "No matches" : "No categories";
+      $mentionMenu.appendChild(empty);
+    }
+    rows.forEach((row, idx) => {
+      const el = document.createElement("button");
+      el.type = "button";
+      el.className = "menu-item mention-item" + (idx === mention.selected ? " selected" : "");
+      const icon = CAT_ICONS[row.iconKey] || CAT_ICONS.file;
+      const text = document.createElement("span");
+      text.className = "menu-item-text";
+      text.textContent = row.label;
+      el.innerHTML = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">${icon}</svg>`;
+      el.appendChild(text);
+      if (row.description) {
+        const desc = document.createElement("span");
+        desc.className = "mention-item-desc";
+        desc.textContent = row.description;
+        el.appendChild(desc);
+      }
+      el.addEventListener("mousedown", (e) => {
+        e.preventDefault(); // keep focus in the textarea
+        row.onPick();
+      });
+      $mentionMenu.appendChild(el);
+    });
+    positionMentionMenu();
+  }
+
+  function renderCategoryList(filterText) {
+    mention.mode = "category";
+    const needle = (filterText || "").toLowerCase();
+    const cats = (mention.categories || []).filter((c) => c.label.toLowerCase().includes(needle));
+    mention.selected = Math.min(mention.selected, Math.max(cats.length - 1, 0));
+    renderMentionRows(
+      cats.map((c) => ({
+        iconKey: c.id,
+        label: c.label,
+        onPick: () => pickCategory(c),
+      })),
+    );
+  }
+
+  function renderItemsList() {
+    mention.mode = "items";
+    mention.selected = Math.min(mention.selected, Math.max(mention.items.length - 1, 0));
+    renderMentionRows(
+      mention.items.map((item) => ({
+        iconKey: item.category,
+        label: item.label,
+        description: item.description,
+        onPick: () => pickItem(item),
+      })),
+    );
+  }
+
+  function requestMentionCategoriesIfNeeded() {
+    if (mention.categories === null) {
+      post({ type: "mentionCategories" });
+    }
+  }
+
+  function requestMentionSearch(category, query) {
+    mention.searchSeq += 1;
+    const requestId = mention.searchSeq;
+    mention.latestSearchSeq = requestId;
+    post({ type: "mentionSearch", requestId, category, query });
+  }
+
+  function debouncedSearch(category, query) {
+    if (mention.searchTimer) clearTimeout(mention.searchTimer);
+    mention.searchTimer = setTimeout(() => requestMentionSearch(category, query), 120);
+  }
+
+  // Replace the "#..." token currently under the caret (from mention.anchorStart to
+  // the caret) with `replacement`, and move the caret to just after it.
+  function replaceMentionToken(replacement) {
+    const value = $input.value;
+    const caret = $input.selectionStart;
+    const before = value.slice(0, mention.anchorStart);
+    const after = value.slice(caret);
+    $input.value = before + replacement + after;
+    const newCaret = before.length + replacement.length;
+    $input.setSelectionRange(newCaret, newCaret);
+    autoGrow();
+    updateSendState();
+  }
+
+  function pickCategory(cat) {
+    if (!cat.searchable) {
+      // Fixed categories (Problems/Git Diff/Open Editors) resolve immediately.
+      replaceMentionToken("");
+      closeMentionMenu();
+      resolveMention({ category: cat.id, id: cat.id, label: cat.label });
+      return;
+    }
+    mention.category = cat.id;
+    mention.query = "";
+    replaceMentionToken(`#${cat.id}:`);
+    mention.anchorStart = $input.value.lastIndexOf(`#${cat.id}:`);
+    renderItemsList();
+    requestMentionSearch(cat.id, "");
+  }
+
+  function pickItem(item) {
+    replaceMentionToken("");
+    closeMentionMenu();
+    resolveMention(item);
+  }
+
+  function resolveMention(item) {
+    mention.searchSeq += 1;
+    post({ type: "mentionResolve", requestId: mention.searchSeq, item });
+  }
+
+  // Find the "#token" (no whitespace) ending at the caret, if any. Returns
+  // { start, text } or null when the caret isn't inside a mention token.
+  function findMentionToken() {
+    const value = $input.value;
+    const caret = $input.selectionStart;
+    let i = caret - 1;
+    while (i >= 0 && !/\s/.test(value[i]) && value[i] !== "#") i--;
+    if (i < 0 || value[i] !== "#") return null;
+    return { start: i, text: value.slice(i + 1, caret) };
+  }
+
+  function onComposerInput() {
+    const token = findMentionToken();
+    if (!token) {
+      if (mention.open) closeMentionMenu();
+      return;
+    }
+    mention.open = true;
+    mention.anchorStart = token.start;
+
+    const colonIdx = token.text.indexOf(":");
+    if (colonIdx === -1) {
+      requestMentionCategoriesIfNeeded();
+      renderCategoryList(token.text);
+      return;
+    }
+
+    const catPart = token.text.slice(0, colonIdx);
+    const queryPart = token.text.slice(colonIdx + 1);
+    const known = (mention.categories || []).find((c) => c.id === catPart);
+    if (!known || !known.searchable) {
+      // Not (yet) a recognized searchable category prefix — show category matches.
+      requestMentionCategoriesIfNeeded();
+      renderCategoryList(catPart);
+      return;
+    }
+    mention.category = catPart;
+    mention.query = queryPart;
+    if (mention.mode !== "items") renderItemsList();
+    debouncedSearch(catPart, queryPart);
+  }
+
+  function onComposerKeydown(e) {
+    if (!mention.open) return false;
+    const rows = mention.mode === "items" ? mention.items : mention.categories || [];
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      mention.selected = Math.min(mention.selected + 1, Math.max(rows.length - 1, 0));
+      mention.mode === "items" ? renderItemsList() : renderCategoryList(currentCategoryFilter());
+      return true;
+    }
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      mention.selected = Math.max(mention.selected - 1, 0);
+      mention.mode === "items" ? renderItemsList() : renderCategoryList(currentCategoryFilter());
+      return true;
+    }
+    if (e.key === "Enter" || e.key === "Tab") {
+      if (rows.length === 0) {
+        closeMentionMenu();
+        return false;
+      }
+      e.preventDefault();
+      if (mention.mode === "items") {
+        pickItem(mention.items[mention.selected]);
+      } else {
+        const cats = (mention.categories || []).filter((c) =>
+          c.label.toLowerCase().includes(currentCategoryFilter().toLowerCase()),
+        );
+        if (cats[mention.selected]) pickCategory(cats[mention.selected]);
+      }
+      return true;
+    }
+    if (e.key === "Escape") {
+      e.preventDefault();
+      closeMentionMenu();
+      return true;
+    }
+    return false;
+  }
+
+  function currentCategoryFilter() {
+    const token = findMentionToken();
+    return token ? token.text : "";
+  }
+
+  // ── Context chips (resolved "#" mentions queued for the next message) ────
+  function renderContextChips() {
+    $contextChips.innerHTML = "";
+    $contextChips.hidden = state.contextItems.length === 0;
+    state.contextItems.forEach((item, idx) => {
+      const chip = document.createElement("span");
+      chip.className = "context-chip";
+      const label = document.createElement("span");
+      label.className = "context-chip-label";
+      label.textContent = item.label;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "context-chip-remove";
+      remove.setAttribute("aria-label", `Remove ${item.label} from context`);
+      remove.textContent = "×";
+      remove.addEventListener("click", () => {
+        state.contextItems.splice(idx, 1);
+        renderContextChips();
+      });
+      chip.appendChild(label);
+      chip.appendChild(remove);
+      $contextChips.appendChild(chip);
+    });
   }
 
   // Mirror the Python UI's model label: the alias if set, otherwise
@@ -900,6 +1204,25 @@
       case "error":
         $status.textContent = `Error: ${msg.message}`;
         break;
+
+      case "mentionCategories":
+        mention.categories = msg.categories || [];
+        if (mention.open && mention.mode === "category") {
+          renderCategoryList(currentCategoryFilter());
+        }
+        break;
+
+      case "mentionResults":
+        if (msg.requestId !== mention.latestSearchSeq) break; // stale reply
+        mention.items = msg.items || [];
+        mention.selected = 0;
+        if (mention.open) renderItemsList();
+        break;
+
+      case "mentionResolved":
+        state.contextItems.push(msg.resolved);
+        renderContextChips();
+        break;
     }
   });
 
@@ -907,7 +1230,10 @@
   function send() {
     const content = $input.value;
     if (content.trim()) {
-      post({ type: "send", content, modelId: state.currentModel });
+      const contextBlocks = state.contextItems.map((item) => item.text);
+      post({ type: "send", content, modelId: state.currentModel, contextBlocks });
+      state.contextItems = [];
+      renderContextChips();
       $input.value = "";
       autoGrow();
       updateSendState();
@@ -915,6 +1241,7 @@
   }
   $send.addEventListener("click", send);
   $input.addEventListener("keydown", (e) => {
+    if (onComposerKeydown(e)) return;
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       send();
@@ -931,6 +1258,11 @@
   $input.addEventListener("input", () => {
     autoGrow();
     updateSendState();
+    onComposerInput();
+  });
+  $input.addEventListener("blur", () => {
+    // Defer so a mousedown-selected mention row still registers its pick first.
+    setTimeout(() => closeMentionMenu(), 0);
   });
 
   document.addEventListener("keydown", (e) => {

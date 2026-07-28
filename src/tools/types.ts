@@ -124,6 +124,7 @@ export interface ToolOutput {
  * - `timeout`           tool exceeded the configured timeout (Requirement 3.7)
  * - `execution`         tool raised during execution (Requirement 3.6)
  * - `activation-failure` environment activation could not be applied (Requirement 11.13)
+ * - `no-provider`       no registered provider currently offers the requested tool id (Requirement 9.3)
  */
 export interface ToolError {
   readonly kind:
@@ -136,7 +137,8 @@ export interface ToolError {
     | "rejected"
     | "timeout"
     | "execution"
-    | "activation-failure";
+    | "activation-failure"
+    | "no-provider";
   readonly message: string;
   /** For validation errors: the offending input field name. */
   readonly field?: string;
@@ -258,4 +260,57 @@ export interface ProfileSetFrame extends WSFrame<ProfileSetData> {
   v: number;
   type: "profile.set";
   data: ProfileSetData;
+}
+
+// -----------------------------------------------------------------------------
+// Handshake frames (additive; no existing frame types are changed)
+// -----------------------------------------------------------------------------
+
+/** Payload of a `client.hello` frame (ext→engine). */
+export interface ClientHelloData {
+  /** Previously-assigned Client_ID to re-present on reconnect, if any. */
+  readonly clientId?: string;
+}
+
+/**
+ * `client.hello` frame sent from the extension to the engine to begin the
+ * handshake, optionally re-presenting a Client_ID persisted from a prior
+ * connection (Requirement 9.3).
+ */
+export interface ClientHelloFrame extends WSFrame<ClientHelloData> {
+  v: number;
+  type: "client.hello";
+  data: ClientHelloData;
+}
+
+/** Payload of a `client.hello.ack` frame (engine→ext). */
+export interface ClientHelloAckData {
+  /** The assigned or validated Client_ID for this connection. */
+  readonly clientId: string;
+}
+
+/**
+ * `client.hello.ack` frame confirming the handshake completed and granting the
+ * connection its Client_ID (Requirement 9.3).
+ */
+export interface ClientHelloAckFrame extends WSFrame<ClientHelloAckData> {
+  v: number;
+  type: "client.hello.ack";
+  data: ClientHelloAckData;
+}
+
+/** Payload of a `client.hello.reject` frame (engine→ext). */
+export interface ClientHelloRejectData {
+  /** Reason the handshake was rejected; the engine then closes the socket. */
+  readonly reason: "client_id_in_use";
+}
+
+/**
+ * `client.hello.reject` frame sent when the requested Client_ID is already
+ * held by another active connection (Requirement 9.3).
+ */
+export interface ClientHelloRejectFrame extends WSFrame<ClientHelloRejectData> {
+  v: number;
+  type: "client.hello.reject";
+  data: ClientHelloRejectData;
 }

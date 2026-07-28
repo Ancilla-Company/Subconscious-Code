@@ -457,6 +457,76 @@ body {
   font-size: 0.9em;
 }
 
+/* ── "#" context-mention popup ───────────────────────────────────────── */
+.mention-menu {
+  min-width: 220px;
+  max-width: 360px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+.mention-item {
+  gap: 6px;
+}
+.mention-item-desc {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding-left: 8px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 40%;
+}
+
+/* ── Context chips (resolved "#" mentions queued for the next message) ── */
+.context-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 8px 10px 0;
+}
+.context-chips[hidden] {
+  display: none;
+}
+.context-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 2px 4px 2px 8px;
+  border-radius: 10px;
+  background: var(--vscode-badge-background, var(--vscode-toolbar-hoverBackground));
+  color: var(--vscode-badge-foreground, var(--vscode-foreground));
+  font-size: 0.82em;
+}
+.context-chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+.context-chip-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 1.05em;
+  line-height: 1;
+  padding: 0;
+  opacity: 0.75;
+}
+.context-chip-remove:hover {
+  opacity: 1;
+  background: var(--vscode-toolbar-hoverBackground);
+}
+
 /* ── Tools view ───────────────────────────────────────────────────────── */
 .disconnected-banner {
   padding: 6px 12px;

@@ -28,6 +28,7 @@ import { EngineClient } from "./engine/client";
 import { ChatPanel } from "./panel/chatPanel";
 import { ToolsPanel } from "./panel/toolsPanel";
 import { SettingsView } from "./panel/settingsView";
+import { TerminalOutputTracker } from "./panel/terminalOutputTracker";
 
 import { ConfigStore } from "./tools/configStore";
 import { ToolRegistry, BUILTIN_TOOL_DEFINITIONS } from "./tools/registry";
@@ -35,6 +36,7 @@ import { DefaultWorkspacePathGuard } from "./tools/pathGuard";
 import { ShellCommandDecomposer } from "./tools/commandDecomposer";
 import { ApprovalManager } from "./tools/approvalManager";
 import { VsCodeConfirmationUI } from "./tools/vscodeConfirmationUi";
+import { SettingsTerminalAllowlist } from "./tools/terminalTrustList";
 import { ToolHost } from "./tools/host";
 import type { AutonomyMode, CodingTool, ToolContext } from "./tools/types";
 
@@ -123,6 +125,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const registry = new ToolRegistry(configStore);
   context.subscriptions.push({ dispose: () => registry.dispose() });
 
+  // Persist/re-present the handshake Client_ID across reconnects (R1.5, R9.3).
+  engine.setClientIdStore(configStore);
+
   // ── Safety + approval components ─────────────────────────────────────────────
   const pathGuard = new DefaultWorkspacePathGuard(workspaceRoots);
   const decomposer = new ShellCommandDecomposer();
@@ -132,6 +137,24 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     decomposer,
     initialMode: configStore.load().config.autonomyMode,
   });
+
+  // The terminal per-segment trust list (Requirement 10.5, 10.6) is backed by the
+  // `subconscious.trustedCommands` / `subconscious.commandDenylist` settings.json
+  // arrays (mirroring the Kiro/Copilot trust-list convention). The reader consults
+  // live configuration on every `covers()` call, so edits to settings.json apply
+  // immediately with no extra wiring needed on configuration-change.
+  approvalManager.setTerminalAllowlist(
+    new SettingsTerminalAllowlist({
+      trustedCommands: () =>
+        vscode.workspace
+          .getConfiguration("subconscious")
+          .get<string[]>("trustedCommands", []),
+      commandDenylist: () =>
+        vscode.workspace
+          .getConfiguration("subconscious")
+          .get<string[]>("commandDenylist", []),
+    }),
+  );
 
   // ── Coding tools ─────────────────────────────────────────────────────────────
   const settings = vscode.workspace.getConfiguration("subconscious");
@@ -143,9 +166,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // profile and the Python extension's venv activation) rather than a hidden process.
   const terminalRunner = createVsCodeTerminalRunner();
 
+  // Passively observes shell-integration command activity across all integrated
+  // terminals so the chat "#Terminal" context mention can report recent output
+  // (not just the terminal's name/cwd).
+  const terminalOutput = new TerminalOutputTracker();
+  context.subscriptions.push(terminalOutput);
+
   // The chat view is created early so the ToolHost can forward tool-activity events to
   // it (rendered as expandable cards in the message stream).
-  const chat = new ChatPanel(context.extensionUri, engine, context.workspaceState);
+  const chat = new ChatPanel(context.extensionUri, engine, context.workspaceState, terminalOutput);
 
   const tools: CodingTool[] = [
     new ReadFileTool({ maxReadBytes }),

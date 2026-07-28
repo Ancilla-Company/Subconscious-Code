@@ -75,6 +75,13 @@ export const DEFAULT_APPROVAL_POLICY: ApprovalPolicy = "inherit";
 /** `globalState` key under which the agent configuration is stored. */
 export const AGENT_CONFIG_KEY = "subconscious.agentConfig";
 
+/**
+ * `globalState` key under which the handshake-assigned Client_ID is persisted, so a
+ * restarted or reconnected extension can re-present the same id on `client.hello`
+ * (Requirement 1.5, 9.3).
+ */
+export const CLIENT_ID_KEY = "subconscious.clientId";
+
 /** `workspaceState` key prefix for per-root execution profiles. */
 export const EXECUTION_PROFILE_KEY_PREFIX = "subconscious.executionProfile:";
 
@@ -184,6 +191,29 @@ export class ConfigStore {
   async setDefaultModelId(modelId: string | null): Promise<void> {
     const current = this.load().config;
     await this.save({ ...current, defaultModelId: modelId });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Handshake Client_ID
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Load the Client_ID persisted from a prior handshake, if any. Returns `undefined`
+   * when none is stored or the stored value is not a non-empty string (R1.5, R9.3).
+   */
+  loadClientId(): string | undefined {
+    let raw: unknown;
+    try {
+      raw = this.globalStore.get<unknown>(CLIENT_ID_KEY);
+    } catch {
+      return undefined;
+    }
+    return typeof raw === "string" && raw.length > 0 ? raw : undefined;
+  }
+
+  /** Persist the Client_ID assigned/validated by the engine's `client.hello.ack` (R1.5). */
+  async saveClientId(clientId: string): Promise<void> {
+    await this.globalStore.update(CLIENT_ID_KEY, clientId);
   }
 
   // ---------------------------------------------------------------------------

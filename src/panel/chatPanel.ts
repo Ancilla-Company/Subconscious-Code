@@ -2,6 +2,13 @@ import * as vscode from "vscode";
 import { EngineClient } from "../engine/client";
 import { WSFrame } from "../engine/types";
 import type { ToolEvent } from "../tools/host";
+import {
+  ContextMentionService,
+  isSingletonCategory,
+  type MentionCategory,
+  type MentionItem,
+} from "./contextMentions";
+import type { TerminalOutputTracker } from "./terminalOutputTracker";
 
 /**
  * Webview view shown in the Subconscious activity-bar container.
@@ -19,12 +26,16 @@ export class ChatPanel implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private currentWorkspace?: string;
   private currentThread?: string;
+  /** Resolves "#" context-mention searches/selections for the composer popup. */
+  private readonly mentions: ContextMentionService;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
     private readonly client: EngineClient,
     private readonly memento: vscode.Memento,
+    terminalOutput?: TerminalOutputTracker,
   ) {
+    this.mentions = new ContextMentionService(terminalOutput);
     // Restore the last workspace/thread so a full reload or extension restart returns
     // to where the user left off (the webview is also kept alive on hide/show via
     // retainContextWhenHidden, which covers the common switch-away/back case).
@@ -116,7 +127,8 @@ export class ChatPanel implements vscode.WebviewViewProvider {
           break;
         case "send":
           if (this.currentThread && msg.content?.trim()) {
-            this.client.sendChat(this.currentThread, msg.content.trim(), msg.modelId);
+            const content = composeMessageWithContext(msg.content.trim(), msg.contextBlocks);
+            this.client.sendChat(this.currentThread, content, msg.modelId);
           }
           break;
         case "refreshModels":
@@ -125,9 +137,67 @@ export class ChatPanel implements vscode.WebviewViewProvider {
         case "openTools":
           await vscode.commands.executeCommand("subconscious.configureTools");
           break;
+        case "mentionCategories":
+          this.post({ type: "mentionCategories", categories: MENTION_CATEGORIES });
+          break;
+        case "mentionSearch":
+          await this.handleMentionSearch(msg.requestId, msg.category, msg.query ?? "");
+          break;
+        case "mentionResolve":
+          await this.handleMentionResolve(msg.requestId, msg.item);
+          break;
       }
     } catch (err: any) {
       this.post({ type: "error", message: String(err?.message ?? err) });
+    }
+  }
+
+  /**
+   * Search for "#" mention candidates in a category, replying with the same
+   * `requestId` so the webview can discard stale results from a fast-typing user.
+   */
+  private async handleMentionSearch(
+    requestId: number,
+    category: MentionCategory,
+    query: string,
+  ): Promise<void> {
+    let items: MentionItem[] = [];
+    switch (category) {
+      case "file":
+        items = await this.mentions.searchFiles(query);
+        break;
+      case "folder":
+        items = await this.mentions.searchFolders(query);
+        break;
+      case "terminal":
+        items = this.mentions.listTerminals(query);
+        break;
+      case "symbol":
+        items = await this.mentions.searchSymbols(query);
+        break;
+      default:
+        // Singleton categories (Problems / Git Diff / Open Editors) have no
+        // sub-search: the popup lists them directly without a nested search step.
+        items = [];
+        break;
+    }
+    this.post({ type: "mentionResults", requestId, category, items });
+  }
+
+  /** Resolve a chosen mention into its inlined text block and hand it back. */
+  private async handleMentionResolve(requestId: number, item: MentionItem): Promise<void> {
+    try {
+      const resolved = await this.mentions.resolve(item);
+      this.post({ type: "mentionResolved", requestId, resolved });
+    } catch (err: any) {
+      this.post({
+        type: "mentionResolved",
+        requestId,
+        resolved: {
+          label: item.label,
+          text: `[Context — ${item.label}]\n(failed to resolve: ${String(err?.message ?? err)})`,
+        },
+      });
     }
   }
 
@@ -266,7 +336,8 @@ export class ChatPanel implements vscode.WebviewViewProvider {
   <div id="status" class="status"></div>
   <footer class="composer">
     <div class="composer-box">
-      <textarea id="input" rows="1" placeholder="Message Subconscious…"></textarea>
+      <div id="context-chips" class="context-chips" hidden></div>
+      <textarea id="input" rows="1" placeholder="Message Subconscious… (# to add context)"></textarea>
       <div class="toolbar">
         <div class="pickers">
           <button id="model-trigger" class="picker model-picker" aria-haspopup="true" title="Model">
@@ -297,11 +368,46 @@ export class ChatPanel implements vscode.WebviewViewProvider {
     </div>
   </footer>
   <div id="menu" class="menu" hidden></div>
+  <div id="mention-menu" class="menu mention-menu" hidden></div>
   <script nonce="${nonce}" src="${highlightUri}?v=${nonce}"></script>
   <script nonce="${nonce}" src="${scriptUri}?v=${nonce}"></script>
 </body>
 </html>`;
   }
+}
+
+/** The "#" popup's top-level category list, in display order. */
+const MENTION_CATEGORY_LABELS: ReadonlyArray<{ id: MentionCategory; label: string }> = [
+  { id: "file", label: "Files" },
+  { id: "folder", label: "Folders" },
+  { id: "terminal", label: "Terminal" },
+  { id: "symbol", label: "Code Symbol" },
+  { id: "problems", label: "Problems" },
+  { id: "gitDiff", label: "Git Diff" },
+  { id: "openEditors", label: "Open Editors" },
+];
+
+/** The category list sent to the webview, each flagged with whether it needs a search step. */
+const MENTION_CATEGORIES = MENTION_CATEGORY_LABELS.map((entry) => ({
+  ...entry,
+  searchable: !isSingletonCategory(entry.id),
+}));
+
+/**
+ * Prepend resolved "#" context blocks to the user's message before sending, since
+ * the wire protocol to the engine carries only a single `content` string
+ * (`EngineClient.sendChat`). Each block is separated by a blank line so the model
+ * sees clearly delimited context ahead of the actual request.
+ */
+function composeMessageWithContext(content: string, contextBlocks: unknown): string {
+  if (!Array.isArray(contextBlocks) || contextBlocks.length === 0) {
+    return content;
+  }
+  const blocks = contextBlocks.filter((block): block is string => typeof block === "string");
+  if (blocks.length === 0) {
+    return content;
+  }
+  return `${blocks.join("\n\n")}\n\n${content}`;
 }
 
 function getNonce(): string {

@@ -4,7 +4,13 @@ import WebSocket from "ws";
 import {
   RuntimeInfo, Workspace, Thread, Message, ModelConfig, WSFrame,
 } from "./types";
-import type { ToolCallFrame, ProfileSetFrame } from "../tools/types";
+import type {
+  ToolCallFrame,
+  ProfileSetFrame,
+  ClientHelloFrame,
+  ClientHelloAckFrame,
+  ClientHelloRejectFrame,
+} from "../tools/types";
 import type { ExecutionProfile } from "../env/types";
 import { discoverEngine } from "./discovery";
 
@@ -44,6 +50,25 @@ export type DefaultModelProvider = () => string | null | undefined;
 export type ExecutionProfileProvider = () => ExecutionProfile | undefined;
 
 /**
+ * Persists the handshake-assigned Client_ID so it can be re-presented on a later
+ * `client.hello` (e.g. after a reconnect or extension restart). The existing
+ * `ConfigStore` (backed by `context.globalState`) satisfies this structurally.
+ *
+ * _Requirements: 1.5, 9.3_
+ */
+export interface ClientIdStore {
+  /** The Client_ID persisted from a prior handshake, or `undefined` if none. */
+  loadClientId(): string | undefined;
+  /** Persist the Client_ID assigned/validated by the engine's `client.hello.ack`. */
+  saveClientId(clientId: string): Promise<void>;
+}
+
+/** The outcome of a single `client.hello` round trip. */
+type HelloOutcome =
+  | { readonly kind: "ack"; readonly clientId: string }
+  | { readonly kind: "reject"; readonly reason: string };
+
+/**
  * Client for the local Subconscious engine API.
  *
  * REST calls cover discrete reads/commands; a single WebSocket carries live
@@ -71,6 +96,14 @@ export class EngineClient extends EventEmitter {
   private defaultModelProvider?: DefaultModelProvider;
   /** Provides the execution profile advertised to the engine on connect. */
   private profileProvider?: ExecutionProfileProvider;
+  /** Persists/retrieves the handshake Client_ID across reconnects (R1.5, R9.3). */
+  private clientIdStore?: ClientIdStore;
+  /**
+   * Set after a `client.hello.reject`; the next `client.hello` this connection sends
+   * omits any requested id, so the retry (on the following reconnect) is treated as a
+   * fresh handshake rather than repeating the conflicting id (R1.5).
+   */
+  private forceFreshHelloOnNextAttempt = false;
 
   get baseUrl(): string {
     if (!this.info) {
@@ -93,10 +126,13 @@ export class EngineClient extends EventEmitter {
       const ws = new WebSocket(url);
       this.ws = ws;
 
+      // Gates whether an inbound frame is treated as part of the `client.hello`
+      // handshake or as an ordinary post-handshake frame (R1.5, R9.3). Scoped to
+      // this socket instance so a fresh reconnect always starts a fresh handshake.
+      let handshakeComplete = false;
+
       ws.on("open", () => {
-        this.emit("status", "connected");
-        this.onConnected();
-        resolve();
+        this.sendHello();
       });
       ws.on("message", (raw) => {
         let frame: WSFrame;
@@ -105,6 +141,33 @@ export class EngineClient extends EventEmitter {
         } catch {
           return; /* ignore malformed frame */
         }
+
+        if (!handshakeComplete) {
+          const outcome = this.readHelloOutcome(frame);
+          if (outcome === undefined) {
+            // Any frame other than `client.hello.ack`/`client.hello.reject` arriving
+            // before the handshake completes is dropped (mirrors the engine-side
+            // gating of `tool.register`/`chat.send` until its own handshake finishes).
+            return;
+          }
+          handshakeComplete = true;
+          if (outcome.kind === "reject") {
+            // Treat a reject as a fresh handshake going forward: the next attempt
+            // presents no requested Client_ID (R1.5). The engine closes the socket
+            // after a reject; the existing `close` handler schedules the retry.
+            this.forceFreshHelloOnNextAttempt = true;
+            reject(new Error(`Engine rejected client.hello: ${outcome.reason}`));
+            return;
+          }
+          void this.clientIdStore
+            ?.saveClientId(outcome.clientId)
+            .catch(() => undefined);
+          this.emit("status", "connected");
+          this.onConnected();
+          resolve();
+          return;
+        }
+
         // Route engine→ext tool-callback RPC to the attached ToolHost (R3.1). The
         // frame is still emitted as an "event" for observers; no UI listener acts on
         // `tool.call`, so this is side-effect free for the chat view.
@@ -124,6 +187,37 @@ export class EngineClient extends EventEmitter {
         }
       });
     });
+  }
+
+  /** Parse a `client.hello.ack`/`client.hello.reject` frame; `undefined` for any other type. */
+  private readHelloOutcome(frame: WSFrame): HelloOutcome | undefined {
+    if (frame.type === "client.hello.ack") {
+      const ack = frame as ClientHelloAckFrame;
+      return { kind: "ack", clientId: ack.data.clientId };
+    }
+    if (frame.type === "client.hello.reject") {
+      const rejectFrame = frame as ClientHelloRejectFrame;
+      return { kind: "reject", reason: rejectFrame.data.reason };
+    }
+    return undefined;
+  }
+
+  /**
+   * Begin the handshake on a freshly-opened socket: send `client.hello`, re-presenting
+   * the persisted Client_ID (if any) unless the previous attempt was rejected, in
+   * which case this attempt omits it (R1.5, R9.3).
+   */
+  private sendHello(): void {
+    const requestedId = this.forceFreshHelloOnNextAttempt
+      ? undefined
+      : this.clientIdStore?.loadClientId();
+    this.forceFreshHelloOnNextAttempt = false;
+    const frame: ClientHelloFrame = {
+      v: FRAME_VERSION,
+      type: "client.hello",
+      data: requestedId !== undefined ? { clientId: requestedId } : {},
+    };
+    this.send(frame);
   }
 
   dispose(): void {
@@ -162,6 +256,15 @@ export class EngineClient extends EventEmitter {
   /** Set the provider of the execution profile advertised on connect (R11.5). */
   setExecutionProfileProvider(provider: ExecutionProfileProvider): void {
     this.profileProvider = provider;
+  }
+
+  /**
+   * Attach the store used to persist the handshake-assigned Client_ID and to
+   * re-present it on a later `client.hello` (Requirement 1.5, 9.3). The existing
+   * `ConfigStore` (backed by `context.globalState`) satisfies this interface.
+   */
+  setClientIdStore(store: ClientIdStore): void {
+    this.clientIdStore = store;
   }
 
   /** Whether the WebSocket is currently open (part of the `ToolFrameTransport` surface). */

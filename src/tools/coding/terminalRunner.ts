@@ -15,18 +15,10 @@
 import * as vscode from "vscode";
 
 import type { CommandInvocation, CommandRunResult, CommandRunner } from "./terminal";
+import { stripAnsi } from "./ansi";
 
 /** Name of the reused agent terminal. */
 const TERMINAL_NAME = "Subconscious Agent";
-
-/** Strip ANSI/VT control sequences from captured shell-integration output. */
-function stripAnsi(text: string): string {
-  // CSI sequences (colours, cursor moves) and OSC sequences (titles, hyperlinks).
-  return text
-    .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, "")
-    .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, "")
-    .replace(/\u001b[@-Z\\-_]/g, "");
-}
 
 /**
  * Build a {@link CommandRunner} that drives the visible integrated terminal. A single

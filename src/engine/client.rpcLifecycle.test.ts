@@ -126,8 +126,10 @@ function makeProfile(root: string): ExecutionProfile {
 
 /**
  * Drive EngineClient through a `connected` transition using a FakeWebSocket:
- * preset the RuntimeInfo, invoke the private `openSocket`, then fire `open` on the
- * freshly-constructed fake socket. Returns that socket for further driving.
+ * preset the RuntimeInfo, invoke the private `openSocket`, fire `open` on the
+ * freshly-constructed fake socket (which sends `client.hello`), then reply with a
+ * `client.hello.ack` to complete the handshake (R1.5, R9.3). Returns that socket for
+ * further driving.
  */
 async function connect(client: EngineClient): Promise<FakeWebSocket> {
   const internals = client as unknown as ClientInternals;
@@ -135,6 +137,13 @@ async function connect(client: EngineClient): Promise<FakeWebSocket> {
   const opening = internals.openSocket();
   const socket = FakeWebSocket.latest();
   socket.fireOpen();
+  socket.fireMessage(
+    JSON.stringify({
+      v: FRAME_VERSION,
+      type: "client.hello.ack",
+      data: { clientId: "test-client-id" },
+    }),
+  );
   await opening;
   return socket;
 }

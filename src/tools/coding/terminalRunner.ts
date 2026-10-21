@@ -14,15 +14,48 @@
 
 import * as vscode from "vscode";
 
+import type { ShellKind } from "../commandDecomposer";
 import type { CommandInvocation, CommandRunResult, CommandRunner } from "./terminal";
 import { stripAnsi } from "./ansi";
 
 /** Name of the reused agent terminal. */
-const TERMINAL_NAME = "Subconscious Agent";
+const TERMINAL_NAME = "Subconscious";
+
+/**
+ * Detect the {@link ShellKind} whose syntax rules apply to the user's actual default
+ * terminal shell (`vscode.env.shell`), so command decomposition/approval and the
+ * command line handed to the runner both use the right quoting/chaining rules —
+ * rather than assuming PowerShell on every Windows machine, which breaks for users
+ * whose default profile is Git Bash, WSL, cmd.exe, or another POSIX-like shell.
+ * Falls back to a platform default when the executable can't be recognized.
+ */
+export function detectShellKind(): ShellKind {
+  const shellPath = vscode.env.shell.toLowerCase();
+  const exe = shellPath.split(/[\\/]/).pop() ?? shellPath;
+
+  if (exe.includes("powershell") || exe.includes("pwsh")) {
+    return "powershell";
+  }
+  if (exe === "cmd" || exe === "cmd.exe") {
+    return "cmd";
+  }
+  if (
+    exe.includes("bash") ||
+    exe.includes("zsh") ||
+    exe.includes("fish") ||
+    exe.includes("sh") ||
+    exe.includes("wsl")
+  ) {
+    return "posix";
+  }
+  // No recognizable shell reported (e.g. remote/web environments): fall back to a
+  // platform-appropriate default rather than guessing wrong.
+  return process.platform === "win32" ? "powershell" : "posix";
+}
 
 /**
  * Build a {@link CommandRunner} that drives the visible integrated terminal. A single
- * "Subconscious Agent" terminal is reused (recreated if the user closed it), so the
+ * "Subconscious" terminal is reused (recreated if the user closed it), so the
  * user can watch what the agent runs.
  */
 export function createVsCodeTerminalRunner(): CommandRunner {
@@ -55,7 +88,8 @@ export function createVsCodeTerminalRunner(): CommandRunner {
           stderr:
             "Command sent to the integrated terminal, but shell integration is " +
             "unavailable so its output and exit code could not be captured. Inspect " +
-            "the 'Subconscious Agent' terminal for the result.",
+            "the 'Subconscious' terminal for the result.",
+          cwd: invocation.cwd,
         });
         return;
       }
@@ -94,10 +128,15 @@ export function createVsCodeTerminalRunner(): CommandRunner {
           return;
         }
         cleanup();
+        // Report the terminal's actual working directory after the command ran (it
+        // may have changed the directory itself, e.g. `cd ..`), falling back to the
+        // invocation's cwd when shell integration doesn't report one.
+        const resultCwd = term.shellIntegration?.cwd?.fsPath ?? invocation.cwd;
         resolve({
           exitCode: event.exitCode ?? null,
           stdout: stripAnsi(output),
           stderr: "",
+          cwd: resultCwd,
         });
       });
 

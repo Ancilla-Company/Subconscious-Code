@@ -125,8 +125,8 @@
 
   // ── Default model ───────────────────────────────────────────────────────────
   function modelLabel(m) {
-    const base = m.model || m.id;
-    return m.provider ? `${m.provider} · ${base}` : base;
+    const base = m.name || m.alias || m.model || m.id;
+    return m.provider ? `${base} (${m.provider})` : base;
   }
 
   function renderModels(models, available, defaultModelId) {
@@ -346,10 +346,76 @@
     post({ type: "saveProfile", profile: serializeProfile() });
   });
 
+  // ── Account and server ──────────────────────────────────────────────────────
+  const $acctStatus = document.getElementById("acct-status");
+  const $acctError = document.getElementById("acct-error");
+  const $acctLogin = document.getElementById("acct-login");
+  const $acctEmail = document.getElementById("acct-email");
+  const $acctPassword = document.getElementById("acct-password");
+  const $acctSignin = document.getElementById("acct-signin");
+  const $acctSignout = document.getElementById("acct-signout");
+  const $acctRefresh = document.getElementById("acct-refresh");
+  const $acctDevices = document.getElementById("acct-devices");
+
+  function showAcctError(message) {
+    $acctError.textContent = message || "";
+    $acctError.hidden = !message;
+  }
+
+  function renderAccount(msg) {
+    showAcctError(msg.error);
+    $acctDevices.innerHTML = "";
+    const version = msg.engineVersion ? ` (engine ${msg.engineVersion})` : "";
+    if (!msg.available) {
+      $acctStatus.textContent = "Engine not reachable.";
+      $acctLogin.hidden = true;
+      $acctSignout.hidden = true;
+      return;
+    }
+    $acctLogin.hidden = !!msg.authenticated;
+    $acctSignout.hidden = !msg.authenticated;
+    const hive = msg.hive;
+    if (!msg.authenticated) {
+      $acctStatus.textContent = `Not signed in${version}.`;
+      return;
+    }
+    const who = msg.displayName || msg.email || "your account";
+    let line = `Signed in as ${who}${version}.`;
+    if (hive && hive.problem) line += ` Offline: ${hive.problem}`;
+    else if (hive && hive.state && hive.state !== "running") line += ` Server link: ${hive.state}.`;
+    $acctStatus.textContent = line;
+    for (const node of (hive && hive.nodes) || []) {
+      const row = document.createElement("div");
+      row.className = "tool-row";
+      const kind = node.kind === "engine" || node.kind === "full" ? "Engine" : "Client";
+      const parts = [node.online ? "Online" : "Offline", kind];
+      if (node.platform) parts.push(node.platform);
+      row.textContent = `${node.name || node.id}${node.local ? " (this engine)" : ""}: ${parts.join(", ")}`;
+      $acctDevices.appendChild(row);
+    }
+  }
+
+  $acctSignin.addEventListener("click", () => {
+    showAcctError("");
+    post({ type: "login", email: $acctEmail.value, password: $acctPassword.value });
+    $acctPassword.value = "";
+  });
+  $acctSignout.addEventListener("click", () => post({ type: "logout" }));
+  $acctRefresh.addEventListener("click", () => {
+    showAcctError("");
+    post({ type: "refreshAccount", reconnect: true });
+  });
+
   // ── Extension → webview ───────────────────────────────────────────────────────
   window.addEventListener("message", (event) => {
     const msg = event.data;
     switch (msg.type) {
+      case "account":
+        renderAccount(msg);
+        break;
+      case "accountError":
+        showAcctError(msg.message);
+        break;
       case "init":
         maxInstructionsLength = msg.maxInstructionsLength || maxInstructionsLength;
         $ciMax.textContent = String(maxInstructionsLength);

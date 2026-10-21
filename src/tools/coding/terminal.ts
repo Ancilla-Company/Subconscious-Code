@@ -82,6 +82,13 @@ export interface CommandRunResult {
   readonly stdout: string;
   /** Captured standard error. */
   readonly stderr: string;
+  /**
+   * The terminal's actual working directory after the command ran, when the runner
+   * can observe it (e.g. via shell-integration `cwd` reporting). Falls back to
+   * {@link CommandInvocation.cwd} when the runner does not report one — for example
+   * when the command itself changed directory (`cd ..`) and the runner can detect it.
+   */
+  readonly cwd?: string;
 }
 
 /**
@@ -234,16 +241,26 @@ function formatResult(
   if (result.stderr.length > 0) {
     parts.push(result.stderr);
   }
-  const content =
+  const output =
     parts.length > 0
       ? parts.join("\n")
       : `Command completed with exit code ${String(result.exitCode)}.`;
+
+  // Surface which shell the command ran under and its resulting working directory
+  // ahead of the captured output, so the agent knows the syntax it must use for any
+  // follow-up command (e.g. PowerShell vs. POSIX chaining/quoting) and where a
+  // relative path in that output resolves from — without having to infer either from
+  // a separate tool call.
+  const cwd = result.cwd ?? invocation.cwd;
+  const header = `[shell: ${invocation.shell}] [cwd: ${cwd}]`;
+  const content = `${header}\n${output}`;
 
   return {
     content,
     data: {
       command: invocation.command,
-      cwd: invocation.cwd,
+      shell: invocation.shell,
+      cwd,
       exitCode: result.exitCode,
       stdout: result.stdout,
       stderr: result.stderr,

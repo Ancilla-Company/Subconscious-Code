@@ -8,7 +8,7 @@
 //                │                 └─▶ ApprovalManager ─▶ terminal tools
 //                └─▶ EnvironmentDetector (per-root ExecutionProfile)
 //
-// The chat and Settings_View (`subconscious.settings`) webviews are registered in the
+// The chat webview is registered in the
 // activity-bar container; the Coding_Tools management surface is an editor-area
 // "Configure Tools" page (`ToolsPanel`) opened via the `subconscious.configureTools`
 // command and the gear button in the chat view title. MCP servers declared in
@@ -25,7 +25,7 @@ import * as fs from "fs";
 import * as path from "path";
 
 import { EngineClient } from "./engine/client";
-import { ChatPanel } from "./panel/chatPanel";
+import { ChatPanel, type FileChangeActions } from "./panel/chatPanel";
 import { ToolsPanel } from "./panel/toolsPanel";
 import { SettingsView } from "./panel/settingsView";
 import { TerminalOutputTracker } from "./panel/terminalOutputTracker";
@@ -37,7 +37,12 @@ import { ShellCommandDecomposer } from "./tools/commandDecomposer";
 import { ApprovalManager } from "./tools/approvalManager";
 import { VsCodeConfirmationUI } from "./tools/vscodeConfirmationUi";
 import { SettingsTerminalAllowlist } from "./tools/terminalTrustList";
-import { ToolHost } from "./tools/host";
+import { ToolHost, type ToolEvent } from "./tools/host";
+import {
+  FileChangeJournal,
+  type FileChangeInput,
+  type UndoFileSystem,
+} from "./tools/fileChangeJournal";
 import type { AutonomyMode, CodingTool, ToolContext } from "./tools/types";
 
 import { McpManager, type McpConfigSource } from "./mcp/manager";
@@ -53,7 +58,6 @@ import {
 import {
   ListDirectoryTool,
   SearchFilesTool,
-  GrepSearchTool,
   GetDiagnosticsTool,
   FetchWebTool,
 } from "./tools/coding/readOnly";
@@ -65,7 +69,7 @@ import {
 } from "./tools/coding/parity";
 import { GetWorkspaceContextTool } from "./tools/coding/workspaceContext";
 import { StartDebugTool } from "./tools/coding/debug";
-import { createVsCodeTerminalRunner } from "./tools/coding/terminalRunner";
+import { createVsCodeTerminalRunner, detectShellKind } from "./tools/coding/terminalRunner";
 
 import {
   DefaultEnvironmentDetector,
@@ -111,6 +115,7 @@ function firstWorkspaceRoot(): string | undefined {
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   client = new EngineClient();
   const engine = client;
+  engine.setClientVersion(String(context.extension.packageJSON?.version ?? ""));
 
   // When the window has no folder open, tools fall back to a user-chosen working
   // directory persisted in globalState (see `subconscious.setWorkingDirectory`).
@@ -128,15 +133,47 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // Persist/re-present the handshake Client_ID across reconnects (R1.5, R9.3).
   engine.setClientIdStore(configStore);
 
+  // ── Coding tools setup ────────────────────────────────────────────────────────
+  const settings = vscode.workspace.getConfiguration("subconscious");
+  const maxReadBytes = settings.get<number>("maxReadBytes", 10_485_760);
+  const toolTimeoutSeconds = settings.get<number>("toolTimeoutSeconds", 120);
+
+  // Terminal tools run in the VISIBLE integrated terminal (inheriting the user's shell
+  // profile and the Python extension's venv activation) rather than a hidden process.
+  const terminalRunner = createVsCodeTerminalRunner();
+
+  // Passively observes shell-integration command activity across all integrated
+  // terminals so the chat "#Terminal" context mention can report recent output
+  // (not just the terminal's name/cwd).
+  const terminalOutput = new TerminalOutputTracker();
+  context.subscriptions.push(terminalOutput);
+
+  // The chat view is created early so the ToolHost can forward tool-activity events to
+  // it (rendered as expandable cards in the message stream), and so the approval
+  // manager and diff presenter below can post their in-chat confirmation dialogues
+  // to it instead of a modal alert.
+  const chat = new ChatPanel(context.extensionUri, engine, context.workspaceState, terminalOutput);
+  const diffPresenter = createDiffPresenter(context, chat);
+
   // ── Safety + approval components ─────────────────────────────────────────────
   const pathGuard = new DefaultWorkspacePathGuard(workspaceRoots);
   const decomposer = new ShellCommandDecomposer();
+  // Detect the user's actual configured terminal shell (rather than assuming
+  // PowerShell on every Windows machine) so command decomposition/approval and the
+  // terminal tools agree on which shell's syntax rules apply.
+  const shellKind = detectShellKind();
+  const confirmationUi = new VsCodeConfirmationUI(chat.post.bind(chat), chat.isVisible.bind(chat));
   const approvalManager = new ApprovalManager({
     policyView: registry,
-    confirmationUi: new VsCodeConfirmationUI(),
+    confirmationUi,
     decomposer,
+    shell: shellKind,
     initialMode: configStore.load().config.autonomyMode,
   });
+  // Route the webview's confirmation button clicks (forwarded by ChatPanel) back to
+  // the pending in-chat confirmation promise.
+  chat.confirmationResponseHandler = (requestId, outcome) =>
+    confirmationUi.handleConfirmationResponse(requestId, outcome);
 
   // The terminal per-segment trust list (Requirement 10.5, 10.6) is backed by the
   // `subconscious.trustedCommands` / `subconscious.commandDenylist` settings.json
@@ -156,37 +193,32 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
   );
 
-  // ── Coding tools ─────────────────────────────────────────────────────────────
-  const settings = vscode.workspace.getConfiguration("subconscious");
-  const maxReadBytes = settings.get<number>("maxReadBytes", 10_485_760);
-  const toolTimeoutSeconds = settings.get<number>("toolTimeoutSeconds", 120);
-
-  const diffPresenter = createDiffPresenter(context);
-  // Terminal tools run in the VISIBLE integrated terminal (inheriting the user's shell
-  // profile and the Python extension's venv activation) rather than a hidden process.
-  const terminalRunner = createVsCodeTerminalRunner();
-
-  // Passively observes shell-integration command activity across all integrated
-  // terminals so the chat "#Terminal" context mention can report recent output
-  // (not just the terminal's name/cwd).
-  const terminalOutput = new TerminalOutputTracker();
-  context.subscriptions.push(terminalOutput);
-
-  // The chat view is created early so the ToolHost can forward tool-activity events to
-  // it (rendered as expandable cards in the message stream).
-  const chat = new ChatPanel(context.extensionUri, engine, context.workspaceState, terminalOutput);
+  // ── File-change journal (in-chat Show / Undo on create_file & edit_file) ─────
+  // Records the before/after bytes of every successful file mutation so the chat card
+  // can open a diff or restore the file directly. Undo is local only: it never sends
+  // a frame to the engine, so taking back an edit costs no tokens and leaves the
+  // transcript alone.
+  const fileChangeJournal = new FileChangeJournal(nodeUndoFileSystem);
+  // Correlates a recorded change back to the tool call that made it, so the right
+  // card gets the Show/Undo buttons: `toolStart` gives us callId → path, the tool's
+  // reporter gives us path → changeId, and `toolEnd` joins them.
+  const toolCallPaths = new Map<string, string>();
+  const changeIdByPath = new Map<string, string>();
+  const reportFileChange = (change: FileChangeInput): void => {
+    const record = fileChangeJournal.record(change);
+    changeIdByPath.set(change.path, record.id);
+  };
 
   const tools: CodingTool[] = [
     new ReadFileTool({ maxReadBytes }),
-    new CreateFileTool(),
-    new EditFileTool(diffPresenter),
+    new CreateFileTool(undefined, reportFileChange),
+    new EditFileTool(diffPresenter, undefined, reportFileChange),
     new ListDirectoryTool(),
     new SearchFilesTool(),
-    new GrepSearchTool(),
     new GetDiagnosticsTool(),
     new FetchWebTool(),
-    new RunTerminalTool({ approval: approvalManager, runner: terminalRunner }),
-    new RunTestsTool({ approval: approvalManager, runner: terminalRunner }),
+    new RunTerminalTool({ approval: approvalManager, runner: terminalRunner, shell: shellKind }),
+    new RunTestsTool({ approval: approvalManager, runner: terminalRunner, shell: shellKind }),
     new ListCodeUsagesTool(),
     new GetChangesTool(),
     new RunTaskTool(),
@@ -206,14 +238,64 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
 
   // ── Tool-callback host ───────────────────────────────────────────────────────
+  /** Tool ids whose cards offer the in-chat Show / Undo buttons. */
+  const FILE_MUTATING_TOOL_IDS = new Set(["create_file", "edit_file"]);
+
+  /**
+   * Forward tool activity to the chat, attaching the recorded file change to a
+   * successful create_file/edit_file so its card can offer Show / Undo. The path is
+   * remembered from the start event (the end event carries no input), which also keeps
+   * concurrent calls on different files correctly matched.
+   */
+  const onToolEvent = (event: ToolEvent): void => {
+    if (event.phase === "start") {
+      if (FILE_MUTATING_TOOL_IDS.has(event.tool)) {
+        const path = readInputPath(event.input);
+        if (path !== undefined) {
+          toolCallPaths.set(event.callId, path);
+        }
+      }
+      chat.showToolActivity(event);
+      return;
+    }
+
+    const path = toolCallPaths.get(event.callId);
+    toolCallPaths.delete(event.callId);
+    if (!event.ok || path === undefined) {
+      chat.showToolActivity(event);
+      return;
+    }
+    const changeId = changeIdByPath.get(path);
+    changeIdByPath.delete(path);
+    if (changeId === undefined) {
+      chat.showToolActivity(event);
+      return;
+    }
+    const record = fileChangeJournal.get(changeId);
+    chat.showToolActivity({
+      ...event,
+      change: {
+        id: changeId,
+        path,
+        created: record?.previousContent === null,
+      },
+    });
+  };
+
   const host = new ToolHost({
     registry,
     tools,
     transport: engine,
     createContext,
     timeoutMs: toolTimeoutSeconds * 1000,
-    onToolEvent: (event) => chat.showToolActivity(event),
+    onToolEvent,
   });
+
+  // The chat card's Show / Undo buttons, both entirely local to the editor.
+  chat.fileChangeActions = {
+    show: (changeId) => showFileChange(context, fileChangeJournal, changeId),
+    undo: (changeId) => fileChangeJournal.undo(changeId),
+  } satisfies FileChangeActions;
   // Route inbound tool.call frames and (re-)register on connect / registry change.
   engine.attachToolHost(host, registry.onDidChange);
 
@@ -241,9 +323,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.window.registerWebviewViewProvider(ChatPanel.viewType, chat, {
       webviewOptions: { retainContextWhenHidden: true },
     }),
-    vscode.window.registerWebviewViewProvider(SettingsView.viewType, settingsView, {
-      webviewOptions: { retainContextWhenHidden: true },
-    }),
+    // Settings open as an editor-area page, like Configure Tools.
+    vscode.commands.registerCommand("subconscious.openSettings", () => settingsView.show()),
+    { dispose: () => settingsView.dispose() },
     vscode.commands.registerCommand("subconscious.reconnect", () => connect(engine)),
     vscode.commands.registerCommand("subconscious.newThread", () => chat.newThread()),
     vscode.commands.registerCommand("subconscious.configureTools", () =>
@@ -379,12 +461,101 @@ async function initializeProfile(
   context.subscriptions.push({ dispose: () => watcher.dispose() });
 }
 
+/** Read a `path` string out of an untrusted tool input, or `undefined`. */
+function readInputPath(input: unknown): string | undefined {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return undefined;
+  }
+  const value = (input as Record<string, unknown>).path;
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/** {@link UndoFileSystem} backed by Node's `fs/promises`, used to revert a change. */
+const nodeUndoFileSystem: UndoFileSystem = {
+  async writeFile(filePath: string, data: string): Promise<void> {
+    await fs.promises.writeFile(filePath, data, "utf8");
+  },
+  async remove(filePath: string): Promise<void> {
+    try {
+      await fs.promises.unlink(filePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw error;
+      }
+    }
+  },
+  async readFile(filePath: string): Promise<string> {
+    return fs.promises.readFile(filePath, "utf8");
+  },
+  async exists(filePath: string): Promise<boolean> {
+    try {
+      await fs.promises.access(filePath);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+};
+
+/** Content-provider scheme used to show a recorded change's "before" side. */
+const CHANGE_SCHEME = "subconscious-change";
+
+/** Registered lazily on first use; maps a change id to its pre-change content. */
+let changeContentProvider: { readonly contents: Map<string, string> } | undefined;
+
+/**
+ * "Show" a recorded file change in the editor: a side-by-side diff of the file's
+ * pre-change content against what it holds now, or just the file itself when the
+ * change created it (there is no meaningful "before"). Read-only and local — nothing
+ * is sent to the engine.
+ */
+async function showFileChange(
+  context: vscode.ExtensionContext,
+  journal: FileChangeJournal,
+  changeId: string,
+): Promise<void> {
+  const record = journal.get(changeId);
+  if (record === undefined) {
+    vscode.window.showInformationMessage(
+      "Subconscious: this change is no longer available to show (it was made before the window was reloaded).",
+    );
+    return;
+  }
+
+  const fileUri = vscode.Uri.file(record.path);
+  if (record.previousContent === null) {
+    // Created file: nothing to diff against, so just open it.
+    await vscode.window.showTextDocument(fileUri, { preview: true });
+    return;
+  }
+
+  if (changeContentProvider === undefined) {
+    const contents = new Map<string, string>();
+    changeContentProvider = { contents };
+    context.subscriptions.push(
+      vscode.workspace.registerTextDocumentContentProvider(CHANGE_SCHEME, {
+        provideTextDocumentContent: (uri) => contents.get(uri.path) ?? "",
+      }),
+    );
+  }
+
+  const key = `/${changeId}/${path.basename(record.path)}`;
+  changeContentProvider.contents.set(key, record.previousContent);
+  await vscode.commands.executeCommand(
+    "vscode.diff",
+    vscode.Uri.parse(`${CHANGE_SCHEME}:${key}`),
+    fileUri,
+    `${path.basename(record.path)} — before agent edit ↔ now`,
+  );
+}
+
 /**
  * Build the production {@link DiffPresenter} for `edit_file`: it shows a side-by-side
- * diff of the file's current contents against the proposed contents, then asks the
- * user to apply or discard the change (Requirement 6.2, 6.4).
+ * diff of the file's current contents against the proposed contents (a native VS Code
+ * editor view), then asks the user to apply or discard the change as an in-chat
+ * dialogue — never a modal `showInformationMessage` alert — (Requirement 6.2, 6.4).
  */
-function createDiffPresenter(context: vscode.ExtensionContext): DiffPresenter {
+function createDiffPresenter(context: vscode.ExtensionContext, chat: ChatPanel): DiffPresenter {
   const scheme = "subconscious-edit";
   const proposedByPath = new Map<string, string>();
   const provider: vscode.TextDocumentContentProvider = {
@@ -401,7 +572,8 @@ function createDiffPresenter(context: vscode.ExtensionContext): DiffPresenter {
     proposedByPath.set(key, request.proposedContent);
     const proposedUri = vscode.Uri.parse(`${scheme}:${key}`);
     const originalUri = vscode.Uri.file(request.path);
-    const title = `Proposed edit: ${vscode.workspace.asRelativePath(originalUri)}`;
+    const relativePath = vscode.workspace.asRelativePath(originalUri);
+    const title = `Proposed edit: ${relativePath}`;
 
     try {
       await vscode.commands.executeCommand(
@@ -410,12 +582,7 @@ function createDiffPresenter(context: vscode.ExtensionContext): DiffPresenter {
         proposedUri,
         title,
       );
-      const choice = await vscode.window.showInformationMessage(
-        `Apply the proposed edit to ${vscode.workspace.asRelativePath(originalUri)}?`,
-        { modal: true },
-        "Apply",
-      );
-      return choice === "Apply";
+      return await chat.confirmDiff("Edit File", relativePath);
     } finally {
       proposedByPath.delete(key);
     }

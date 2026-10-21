@@ -1,7 +1,7 @@
 // Feature: agent-tools-and-settings — the tool catalogue (ToolRegistry).
 //
 // The ToolRegistry is the single source of truth for the extension's Coding_Tools:
-// the ten built-in tool definitions (id, display name, description, input schema,
+// the built-in tool definitions (id, display name, description, input schema,
 // category, classification, default-enabled flag, per Requirement 1.1–1.4) and their
 // live enabled/approval-policy state.
 //
@@ -14,6 +14,10 @@
 // `all()` and `enabledDefinitions()` return definitions ordered by category then
 // display name (Requirement 7.2). `setApprovalPolicy` accepts only the defined
 // `ApprovalPolicy` values (Requirement 7.4).
+//
+// **Note:** grep_search has been removed as it is not cross-platform compatible.
+// The terminal tool (`run_terminal`) properly detects and uses the correct shell
+// for each platform (PowerShell on Windows, POSIX shell on Unix/Linux/macOS).
 //
 // _Requirements: 1.1, 1.2, 1.3, 1.4, 7.3, 7.4, 9.2_
 
@@ -33,10 +37,13 @@ import type {
 // -----------------------------------------------------------------------------
 
 /**
- * The ten built-in Coding_Tools (Requirement 1.1) with their category,
+ * The built-in Coding_Tools (Requirement 1.1) with their category,
  * classification (Requirement 1.3, 1.4), default-enabled flag, and input schema.
  * Declared in a fixed source order; consumers that need catalogue ordering use
  * `all()` / `enabledDefinitions()`, which sort by category then display name.
+ * 
+ * grep_search was removed as it's not cross-platform compatible. Use the terminal
+ * tool with OS-specific search commands (grep/findstr) or VS Code's built-in search.
  */
 export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   {
@@ -116,35 +123,8 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     defaultEnabled: true,
   },
   {
-    id: "grep_search",
-    displayName: "Grep Search",
-    description:
-      "Search file contents across the workspace for a regular-expression pattern and return matching lines.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        query: {
-          type: "string",
-          description: "Regular-expression pattern to search for within file contents.",
-        },
-        includePattern: {
-          type: "string",
-          description: "Optional glob restricting which files are searched.",
-        },
-        caseSensitive: {
-          type: "boolean",
-          description: "Whether the search is case-sensitive.",
-        },
-      },
-      required: ["query"],
-      additionalProperties: false,
-    },
-    category: "search",
-    classification: "read-only",
-    defaultEnabled: true,
-  },
-  {
     id: "create_file",
+
     displayName: "Create File",
     description:
       "Create a new file in the workspace with the supplied contents.",
@@ -195,7 +175,7 @@ export const BUILTIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     id: "run_terminal",
     displayName: "Run Terminal Command",
     description:
-      "Run a shell command in a workspace terminal. Compound command lines are decomposed and each command is approved individually.",
+      "Run a shell command in a workspace terminal. Compound command lines are decomposed and each command is approved individually. The terminal automatically uses the correct shell for your operating system (PowerShell on Windows, POSIX shell on Unix/Linux/macOS).",
     inputSchema: {
       type: "object",
       properties: {
@@ -443,7 +423,7 @@ export class ToolRegistry {
 
   /**
    * @param store       Persistence backing for per-tool state.
-   * @param definitions Tool definitions; defaults to the ten built-in tools.
+   * @param definitions Tool definitions; defaults to the built-in tools.
    */
   public constructor(
     private readonly store: ConfigStore,

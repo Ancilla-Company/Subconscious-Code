@@ -3,6 +3,7 @@ import { randomUUID } from "crypto";
 import WebSocket from "ws";
 import {
   RuntimeInfo, Workspace, Thread, Message, ModelConfig, WSFrame,
+  AccountSession, HiveSnapshot,
 } from "./types";
 import type {
   ToolCallFrame,
@@ -85,6 +86,11 @@ type HelloOutcome =
  */
 export class EngineClient extends EventEmitter {
   private info?: RuntimeInfo;
+  /** Who this client tells the engine it is (`client_type=vscode`). */
+  private identity: { type: string; name: string; version?: string } = {
+    type: "vscode",
+    name: "VS Code",
+  };
   private ws?: WebSocket;
   private closing = false;
 
@@ -105,6 +111,16 @@ export class EngineClient extends EventEmitter {
    */
   private forceFreshHelloOnNextAttempt = false;
 
+  /** Set the extension version reported to the engine as `client_version`. */
+  setClientVersion(version: string): void {
+    this.identity = { ...this.identity, version };
+  }
+
+  /** Version of the connected engine (from its `runtime.json`), if known. */
+  get engineVersion(): string | undefined {
+    return this.info?.version;
+  }
+
   get baseUrl(): string {
     if (!this.info) {
       throw new Error("Engine client is not connected.");
@@ -122,7 +138,17 @@ export class EngineClient extends EventEmitter {
   private openSocket(): Promise<void> {
     return new Promise((resolve, reject) => {
       const info = this.info!;
-      const url = `ws://${info.host}:${info.port}/api/v1/events?token=${encodeURIComponent(info.token)}`;
+      // The engine lists connected clients by type (tray menu, device list), so say
+      // who this is. The auth token is the only secret in the query.
+      const query = new URLSearchParams({
+        token: info.token,
+        client_type: this.identity.type,
+        client_name: this.identity.name,
+      });
+      if (this.identity.version) {
+        query.set("client_version", this.identity.version);
+      }
+      const url = `ws://${info.host}:${info.port}/api/v1/events?${query.toString()}`;
       const ws = new WebSocket(url);
       this.ws = ws;
 
@@ -319,9 +345,50 @@ export class EngineClient extends EventEmitter {
       },
     });
     if (!res.ok) {
-      throw new Error(`Engine API ${path} failed: ${res.status} ${res.statusText}`);
+      // Account and hive routes explain themselves in `{"error": "..."}`; prefer that.
+      let detail = "";
+      try {
+        const body = (await res.json()) as { error?: unknown };
+        if (typeof body.error === "string") {
+          detail = body.error;
+        }
+      } catch {
+        /* no JSON body */
+      }
+      throw new Error(
+        detail || `Engine API ${path} failed: ${res.status} ${res.statusText}`,
+      );
     }
     return (await res.json()) as T;
+  }
+
+  // ── Account and hive (the engine owns the server session) ───────────────────
+
+  /** The engine's cloud account session (`GET /account/session`). */
+  getAccountSession(): Promise<AccountSession> {
+    return this.request<AccountSession>("/account/session");
+  }
+
+  /** Sign the engine in to the account; the engine keeps the session. */
+  login(email: string, password: string, deviceName: string): Promise<AccountSession> {
+    return this.request<AccountSession>("/account/login", {
+      method: "POST",
+      body: JSON.stringify({ email, password, device_name: deviceName }),
+    });
+  }
+
+  logout(): Promise<AccountSession> {
+    return this.request<AccountSession>("/account/logout", { method: "POST", body: "{}" });
+  }
+
+  /** This engine's hive state and the account's devices (`GET /hive/nodes`). */
+  getHiveSnapshot(): Promise<HiveSnapshot> {
+    return this.request<HiveSnapshot>("/hive/nodes");
+  }
+
+  /** Reconnect the engine to the server now and report why if it is still offline. */
+  refreshHive(): Promise<HiveSnapshot> {
+    return this.request<HiveSnapshot>("/hive/refresh", { method: "POST", body: "{}" });
   }
 
   listWorkspaces(): Promise<Workspace[]> {
@@ -355,9 +422,21 @@ export class EngineClient extends EventEmitter {
    * the attached {@link DefaultModelProvider}) is applied to the outgoing frame; an
    * explicit `modelId` always overrides the default (Requirement 8.7).
    */
-  sendChat(threadUuid: string, content: string, modelId?: string): string {
+  sendChat(
+    threadUuid: string,
+    content: string,
+    modelId?: string,
+    contextBlocks?: readonly string[],
+  ): string {
     const id = randomUUID();
     const data: Record<string, unknown> = { thread_uuid: threadUuid, content };
+    // Resolved "#" mention context travels in its own field, NOT inlined into
+    // `content`: the engine prompts the model with context + content but persists
+    // only `content`, so the chat transcript shows what the user typed instead of
+    // the full inlined contents of every attached file.
+    if (contextBlocks !== undefined && contextBlocks.length > 0) {
+      data.context_blocks = [...contextBlocks];
+    }
     const effectiveModelId = modelId ?? this.defaultModelProvider?.() ?? undefined;
     if (effectiveModelId) {
       data.model_id = effectiveModelId;
@@ -365,5 +444,23 @@ export class EngineClient extends EventEmitter {
     const frame: WSFrame = { v: FRAME_VERSION, type: "chat.send", id, data };
     this.send(frame);
     return id;
+  }
+
+  /**
+   * Stop an in-flight turn (the composer's stop button). The engine cancels the
+   * agent run, persists whatever the model had already said, and replies with a
+   * terminal `chat.done` carrying `cancelled: true` so the UI returns to idle.
+   *
+   * @param turnId The `chat.send` correlation id to stop; when omitted the engine
+   *               stops every turn currently running on this connection.
+   */
+  cancelChat(turnId?: string): void {
+    const frame: WSFrame = {
+      v: FRAME_VERSION,
+      type: "chat.cancel",
+      id: turnId,
+      data: turnId !== undefined ? { turn_id: turnId } : {},
+    };
+    this.send(frame);
   }
 }

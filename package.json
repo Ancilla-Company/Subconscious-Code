@@ -2,10 +2,14 @@
   "name": "subconscious-code",
   "displayName": "Subconscious Code",
   "description": "Coding-focused chat for the Subconscious engine. Shares workspaces and threads with the Subconscious desktop app.",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "publisher": "ancilla",
   "engines": {
     "vscode": "^1.93.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Ancilla-Company/Subconscious-Code.git"
   },
   "categories": [
     "Other",
@@ -29,11 +33,6 @@
           "id": "subconscious.chat",
           "name": "Code",
           "type": "webview"
-        },
-        {
-          "id": "subconscious.settings",
-          "name": "Settings",
-          "type": "webview"
         }
       ]
     },
@@ -51,8 +50,14 @@
         "title": "Subconscious: Select Workspace"
       },
       {
+        "command": "subconscious.openSettings",
+        "title": "Subconscious: Open Settings",
+        "category": "Subconscious",
+        "icon": "$(settings-gear)"
+      },
+      {
         "command": "subconscious.configureTools",
-        "title": "Subconscious: Configure Tools",
+        "title": "Subconscious: Open Tools",
         "category": "Subconscious",
         "icon": "$(tools)"
       },
@@ -68,6 +73,11 @@
           "command": "subconscious.configureTools",
           "when": "view == subconscious.chat",
           "group": "navigation@1"
+        },
+        {
+          "command": "subconscious.openSettings",
+          "when": "view == subconscious.chat",
+          "group": "navigation@2"
         }
       ]
     },

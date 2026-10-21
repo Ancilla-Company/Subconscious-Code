@@ -120,6 +120,16 @@ export type ToolEvent =
       readonly errorKind?: ToolError["kind"];
       readonly summary: string;
       readonly detail: string;
+      /**
+       * For a successful `create_file`/`edit_file`, the recorded file change this
+       * call made, so the chat card can offer Show/Undo for it.
+       */
+      readonly change?: {
+        readonly id: string;
+        readonly path: string;
+        /** `true` when the file was created (undo deletes it rather than restoring). */
+        readonly created: boolean;
+      };
     };
 
 /** Construction options for {@link ToolHost}. */

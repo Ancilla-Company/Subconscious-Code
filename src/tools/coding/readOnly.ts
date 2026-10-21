@@ -1,17 +1,24 @@
 // Feature: agent-tools-and-settings — read-only coding tools.
 //
-// This module implements the five Read_Only_Tools from the catalogue (Requirement
-// 1.1, 1.4): `list_directory`, `search_files`, `grep_search`, `get_diagnostics`, and
-// `fetch_web`. Each implements the shared `CodingTool` contract (`execute(input, ctx)
-// => Promise<ToolOutput>`) and signals typed failures by throwing a
+// This module implements four of the Read_Only_Tools from the catalogue (Requirement
+// 1.1, 1.4): `list_directory`, `search_files`, `get_diagnostics`, and `fetch_web`.
+// Each implements the shared `CodingTool` contract (`execute(input, ctx) =>
+// Promise<ToolOutput>`) and signals typed failures by throwing a
 // `ToolExecutionError`, exactly as `read_file` does — the `ToolHost` maps the carried
 // `ToolError` into the `tool.result` frame and keeps the WebSocket open.
 //
-// File-path tools (`list_directory`, `grep_search`, and the optional path of
-// `get_diagnostics`) resolve every supplied path through `ToolContext.guard`
-// (`WorkspacePathGuard`) so the workspace-scope rules (Requirement 4) are enforced in
-// exactly one place; an out-of-scope or no-workspace resolution is surfaced as the
-// matching typed error and no filesystem read is attempted.
+// **Note:** a `grep_search` tool previously lived here but was removed — a hand-rolled
+// recursive file-content walk is not cross-platform reliable (binary/encoding
+// heuristics, symlink loops, `.gitignore` handling all differ across OSes) and
+// duplicates what the terminal tool's OS-appropriate search commands (`grep`/
+// `findstr`) or VS Code's own search already do correctly. Use `run_terminal` or
+// `search_files` instead.
+//
+// File-path tools (`list_directory` and the optional path of `get_diagnostics`)
+// resolve every supplied path through `ToolContext.guard` (`WorkspacePathGuard`) so
+// the workspace-scope rules (Requirement 4) are enforced in exactly one place; an
+// out-of-scope or no-workspace resolution is surfaced as the matching typed error and
+// no filesystem read is attempted.
 //
 // `get_diagnostics` wraps `vscode.languages.getDiagnostics` behind an injectable
 // `DiagnosticsSource` so the mapping into `ToolOutput` can be exercised outside the
@@ -39,7 +46,7 @@ import type {
 // Bounds
 // -----------------------------------------------------------------------------
 
-/** Directory names skipped while walking the workspace for `grep_search`. */
+/** Directory names skipped while walking the workspace for {@link ListDirectoryTool}. */
 const EXCLUDED_DIRECTORIES: ReadonlySet<string> = new Set([
   "node_modules",
   ".git",
@@ -50,12 +57,6 @@ const EXCLUDED_DIRECTORIES: ReadonlySet<string> = new Set([
   ".mypy_cache",
   "__pycache__",
 ]);
-
-/** Maximum number of matches `grep_search` returns before flagging truncation. */
-const MAX_GREP_MATCHES = 1000;
-
-/** Files larger than this are skipped by `grep_search` (bytes). */
-const MAX_GREP_FILE_BYTES = 5 * 1024 * 1024;
 
 /** Default cap on the number of paths `search_files` returns. */
 const DEFAULT_SEARCH_MAX_RESULTS = 1000;
@@ -129,25 +130,6 @@ function optionalInteger(
   return value;
 }
 
-/** Read an optional boolean field, or raise a validation error on the wrong type. */
-function optionalBoolean(
-  record: Record<string, unknown>,
-  field: string
-): boolean | undefined {
-  const value = record[field];
-  if (value === undefined) {
-    return undefined;
-  }
-  if (typeof value !== "boolean") {
-    throw new ToolExecutionError({
-      kind: "validation",
-      message: `Input "${field}" must be a boolean when provided.`,
-      field,
-    });
-  }
-  return value;
-}
-
 /**
  * Resolve `inputPath` through the workspace guard, raising the matching typed error
  * (`out-of-scope` / `no-workspace`) when the path is rejected so that no filesystem
@@ -195,33 +177,6 @@ function throwIfAborted(signal: AbortSignal): void {
 /** Convert a filesystem path to a forward-slashed path relative to `root`. */
 function toRelativePosix(root: string, filePath: string): string {
   return path.relative(root, filePath).split(path.sep).join("/");
-}
-
-/**
- * Convert a simple glob (`*`, `**`, `?`) into an anchored `RegExp` matched against a
- * forward-slashed relative path. Used by `grep_search`'s `includePattern` filter.
- */
-function globToRegExp(glob: string): RegExp {
-  let pattern = "";
-  for (let index = 0; index < glob.length; index += 1) {
-    const char = glob[index];
-    if (char === "*") {
-      if (glob[index + 1] === "*") {
-        pattern += ".*";
-        index += 1;
-        if (glob[index + 1] === "/") {
-          index += 1;
-        }
-      } else {
-        pattern += "[^/]*";
-      }
-    } else if (char === "?") {
-      pattern += "[^/]";
-    } else {
-      pattern += char.replace(/[.+^${}()|[\]\\]/g, "\\$&");
-    }
-  }
-  return new RegExp(`(^|/)${pattern}$`);
 }
 
 // -----------------------------------------------------------------------------
@@ -383,165 +338,6 @@ export class SearchFilesTool implements CodingTool {
       truncated,
       data: { paths, truncated },
     };
-  }
-}
-
-// -----------------------------------------------------------------------------
-// grep_search
-// -----------------------------------------------------------------------------
-
-/** A single content match produced by {@link GrepSearchTool}. */
-export interface GrepMatch {
-  readonly path: string;
-  readonly line: number;
-  readonly text: string;
-}
-
-/**
- * `grep_search` — searches file contents across the workspace for a regular
- * expression, returning matching lines. Walks each workspace root (skipping common
- * build/VCS directories and oversized or binary files) up to a bounded number of
- * matches. Read-only: files are only read.
- */
-export class GrepSearchTool implements CodingTool {
-  public readonly id = "grep_search";
-
-  public async execute(input: unknown, ctx: ToolContext): Promise<ToolOutput> {
-    const record = asRecord(input);
-    const query = requireString(record, "query");
-    const includePattern = optionalString(record, "includePattern");
-    const caseSensitive = optionalBoolean(record, "caseSensitive") ?? false;
-
-    let regex: RegExp;
-    try {
-      regex = new RegExp(query, caseSensitive ? "" : "i");
-    } catch (error) {
-      throw new ToolExecutionError({
-        kind: "validation",
-        message: `Invalid regular expression: ${(error as Error).message}`,
-        field: "query",
-      });
-    }
-    const includeRegex =
-      includePattern !== undefined ? globToRegExp(includePattern) : undefined;
-
-    const roots = requireRoots(ctx.guard);
-    const matches: GrepMatch[] = [];
-    let truncated = false;
-
-    for (const root of roots) {
-      if (truncated) {
-        break;
-      }
-      const completed = await this.walk(root, root, ctx.signal, async (filePath) => {
-        const relative = toRelativePosix(root, filePath);
-        if (includeRegex !== undefined && !includeRegex.test(relative)) {
-          return true;
-        }
-        const fileMatches = await GrepSearchTool.matchFile(filePath, relative, regex);
-        for (const match of fileMatches) {
-          matches.push(match);
-          if (matches.length >= MAX_GREP_MATCHES) {
-            truncated = true;
-            return false;
-          }
-        }
-        return true;
-      });
-      if (!completed) {
-        break;
-      }
-    }
-
-    const content = matches
-      .map((match) => `${match.path}:${match.line}: ${match.text}`)
-      .join("\n");
-
-    return { content, truncated, data: { matches, truncated } };
-  }
-
-  /**
-   * Depth-first walk of `dir`, invoking `onFile` for each regular file. Returns
-   * `false` to signal the walk should stop entirely (match cap reached or aborted).
-   */
-  private async walk(
-    root: string,
-    dir: string,
-    signal: AbortSignal,
-    onFile: (filePath: string) => Promise<boolean>
-  ): Promise<boolean> {
-    if (signal.aborted) {
-      return false;
-    }
-
-    let dirents: fs.Dirent[];
-    try {
-      dirents = await fs.promises.readdir(dir, { withFileTypes: true });
-    } catch {
-      // Unreadable directories are skipped rather than aborting the whole search.
-      return true;
-    }
-
-    for (const dirent of dirents) {
-      if (signal.aborted) {
-        return false;
-      }
-      const full = path.join(dir, dirent.name);
-      if (dirent.isDirectory()) {
-        if (EXCLUDED_DIRECTORIES.has(dirent.name)) {
-          continue;
-        }
-        const keepGoing = await this.walk(root, full, signal, onFile);
-        if (!keepGoing) {
-          return false;
-        }
-      } else if (dirent.isFile()) {
-        const keepGoing = await onFile(full);
-        if (!keepGoing) {
-          return false;
-        }
-      }
-    }
-    return true;
-  }
-
-  /** Read a file and return the lines matching `regex`; skips large/binary files. */
-  private static async matchFile(
-    filePath: string,
-    relative: string,
-    regex: RegExp
-  ): Promise<GrepMatch[]> {
-    let stat: fs.Stats;
-    try {
-      stat = await fs.promises.stat(filePath);
-    } catch {
-      return [];
-    }
-    if (stat.size > MAX_GREP_FILE_BYTES) {
-      return [];
-    }
-
-    let buffer: Buffer;
-    try {
-      buffer = await fs.promises.readFile(filePath);
-    } catch {
-      return [];
-    }
-    if (buffer.includes(0)) {
-      // Heuristic: a NUL byte indicates binary content — skip it.
-      return [];
-    }
-
-    const results: GrepMatch[] = [];
-    const lines = buffer.toString("utf8").split(/\r?\n/);
-    for (let index = 0; index < lines.length; index += 1) {
-      const line = lines[index];
-      regex.lastIndex = 0;
-      if (regex.test(line)) {
-        results.push({ path: relative, line: index + 1, text: line.trim() });
-      }
-    }
-    return results;
   }
 }
 

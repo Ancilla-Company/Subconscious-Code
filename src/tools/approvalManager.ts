@@ -34,6 +34,9 @@
 // `./vscodeConfirmationUi`. `resolve` is a pure function of its inputs and the
 // manager's current mutable state (mode, session grants, allowlist).
 //
+// Confirmation timeout is configurable: 0 means infinite (no timeout), allowing
+// human-in-the-loop confirmations to wait indefinitely for user review.
+//
 // _Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 5.7, 5.8, 5.9, 5.10, 5.11, 6.1, 8.2, 10.5, 10.6_
 
 import type { CommandDecomposer, ShellKind } from "./commandDecomposer";
@@ -113,8 +116,11 @@ export interface TerminalAllowlist {
 // Constants
 // -----------------------------------------------------------------------------
 
-/** Default confirmation timeout: a dismissed/unanswered prompt declines (Requirement 5.11). */
-export const CONFIRMATION_TIMEOUT_MS = 300_000;
+/**
+ * Default confirmation timeout: a dismissed/unanswered prompt declines (Requirement 5.11).
+ * Set to 0 for infinite timeout (human-in-the-loop confirmations wait indefinitely).
+ */
+export const CONFIRMATION_TIMEOUT_MS = 0; // Changed from 300_000 to 0 (infinite)
 
 /** The identifier of the terminal tool that receives per-segment handling. */
 export const RUN_TERMINAL_TOOL_ID = "run_terminal";
@@ -145,7 +151,10 @@ export interface ApprovalManagerOptions {
   readonly shell?: ShellKind;
   /** Auto-approve allowlist for terminal segments; omit for none "in play". */
   readonly terminalAllowlist?: TerminalAllowlist;
-  /** Confirmation timeout in milliseconds; defaults to {@link CONFIRMATION_TIMEOUT_MS}. */
+  /**
+   * Confirmation timeout in milliseconds; defaults to {@link CONFIRMATION_TIMEOUT_MS}.
+   * Set to 0 for infinite timeout (human-in-the-loop confirmations wait indefinitely).
+   */
   readonly confirmationTimeoutMs?: number;
   /** The id of the terminal tool; defaults to {@link RUN_TERMINAL_TOOL_ID}. */
   readonly terminalToolId?: string;
@@ -252,6 +261,8 @@ export class ApprovalManager {
    * dismissed or unanswered prompt is treated as a decline (Requirement 5.11). When
    * the user chooses "allow for this session", the grant is recorded and `true` is
    * returned (Requirement 5.10).
+   * 
+   * When confirmationTimeoutMs is 0, waits indefinitely for user response.
    *
    * @returns `true` when the action is approved, `false` when declined/timed out.
    */
@@ -363,11 +374,17 @@ export class ApprovalManager {
 
   /**
    * Race `pending` against the confirmation timeout. If the timeout elapses first,
-   * resolve to `decline` (Requirement 5.11).
+   * resolve to `decline` (Requirement 5.11). When confirmationTimeoutMs is 0,
+   * waits indefinitely (no timeout).
    */
   private withTimeout(
     pending: Promise<ConfirmationOutcome>,
   ): Promise<ConfirmationOutcome> {
+    // No timeout when confirmationTimeoutMs is 0
+    if (this.confirmationTimeoutMs === 0) {
+      return pending;
+    }
+
     return new Promise<ConfirmationOutcome>((resolve) => {
       let settled = false;
       const timer = setTimeout(() => {

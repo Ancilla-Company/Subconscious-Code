@@ -4,8 +4,8 @@
 // (a "virtual page"), mirroring the GitHub Copilot "Configure Tools" surface, rather
 // than a cramped Activity Bar view. It is a singleton: opening it again reveals the
 // existing panel instead of stacking duplicates. It is opened by the
-// `subconscious.configureTools` command — from the Command Palette, or from the gear
-// button in the chat composer.
+// `subconscious.configureTools` command — from the Command Palette, or from the
+// chat view's title bar.
 //
 // All tools logic lives in the host-independent `ToolsController`; this class only owns
 // the `vscode.WebviewPanel` lifecycle and HTML shell (strict CSP + nonce, reusing
@@ -36,7 +36,11 @@ export class ToolsPanel {
       enableScripts: true,
       localResourceRoots: [vscode.Uri.joinPath(extensionUri, "media")],
     };
-    panel.iconPath = vscode.Uri.joinPath(extensionUri, "media", "logo.svg");
+    // Separate light/dark icons so the tab icon stays visible in every theme.
+    panel.iconPath = {
+      light: vscode.Uri.joinPath(extensionUri, "media", "icon-tools-light.svg"),
+      dark: vscode.Uri.joinPath(extensionUri, "media", "icon-tools-dark.svg"),
+    };
     panel.webview.html = this.html(panel.webview, extensionUri);
 
     this.controller = new ToolsController(registry, client, (msg) =>
@@ -64,7 +68,7 @@ export class ToolsPanel {
     }
     const panel = vscode.window.createWebviewPanel(
       ToolsPanel.viewType,
-      "Configure Tools",
+      "Subconscious Tools",
       column,
       { enableScripts: true, retainContextWhenHidden: true },
     );
@@ -101,12 +105,12 @@ export class ToolsPanel {
   <meta http-equiv="Content-Security-Policy" content="${csp}" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <link href="${styleUri}" rel="stylesheet" />
-  <title>Configure Tools</title>
+  <title>Subconscious Tools</title>
 </head>
 <body class="tools-page">
   <div class="tools-page-inner">
     <header class="tools-page-header">
-      <h1 class="tools-page-title">Configure Tools</h1>
+      <h1 class="tools-page-title">Tools</h1>
       <p class="tools-page-subtitle">Select the tools available to the agent. Changes apply to every chat session.</p>
       <div id="disconnected" class="disconnected-banner" hidden>
         Disconnected from engine — changes are saved locally and applied on reconnect.

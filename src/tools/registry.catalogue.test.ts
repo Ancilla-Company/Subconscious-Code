@@ -18,12 +18,17 @@ import type { ToolClassification } from "./types";
 // Expected catalogue (per design.md tool table, Requirements 1.1, 1.3, 1.4)
 // -----------------------------------------------------------------------------
 
-/** The exact set of built-in tool ids (ten core + three Copilot-parity tools). */
+/**
+ * The exact set of built-in tool ids (ten core + three Copilot-parity tools).
+ *
+ * `grep_search` is intentionally absent: a hand-rolled recursive file-content walk
+ * is not cross-platform reliable, so it was removed in favor of `run_terminal`
+ * (OS-appropriate `grep`/`findstr`) or `search_files`.
+ */
 const EXPECTED_TOOL_IDS: readonly string[] = [
   "read_file",
   "list_directory",
   "search_files",
-  "grep_search",
   "create_file",
   "edit_file",
   "run_terminal",
@@ -47,7 +52,6 @@ const EXPECTED_CLASSIFICATION: Readonly<Record<string, ToolClassification>> = {
   read_file: "read-only",
   list_directory: "read-only",
   search_files: "read-only",
-  grep_search: "read-only",
   create_file: "mutating",
   edit_file: "mutating",
   run_terminal: "mutating",
@@ -169,14 +173,13 @@ describe("ToolRegistry catalogue — classification (Requirements 1.3, 1.4)", ()
         "read_file",
         "list_directory",
         "search_files",
-        "grep_search",
         "get_diagnostics",
         "fetch_web",
         "list_code_usages",
         "get_changes",
         "get_workspace_context",
       ].sort(),
-      "exactly the nine read-only tools must be classified read-only"
+      "exactly the eight read-only tools must be classified read-only"
     );
   });
 

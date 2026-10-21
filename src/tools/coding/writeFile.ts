@@ -29,6 +29,7 @@ import * as fsPromises from "fs/promises";
 import * as path from "path";
 
 import { ToolExecutionError } from "../errors";
+import type { FileChangeReporter } from "../fileChangeJournal";
 import type { CodingTool, ToolContext, ToolOutput } from "../types";
 
 // -----------------------------------------------------------------------------
@@ -269,9 +270,14 @@ export class CreateFileTool implements CodingTool {
   public readonly id = "create_file";
 
   private readonly fs: WriteFileSystem;
+  private readonly reportChange?: FileChangeReporter;
 
-  public constructor(fs: WriteFileSystem = nodeWriteFileSystem) {
+  public constructor(
+    fs: WriteFileSystem = nodeWriteFileSystem,
+    reportChange?: FileChangeReporter,
+  ) {
     this.fs = fs;
+    this.reportChange = reportChange;
   }
 
   public async execute(input: unknown, ctx: ToolContext): Promise<ToolOutput> {
@@ -286,6 +292,15 @@ export class CreateFileTool implements CodingTool {
     }
 
     await writeAtomically(this.fs, canonicalPath, content);
+
+    // Report the change so the chat card can offer Show/Undo. `previousContent` is
+    // null because the file did not exist — undoing a creation deletes it again.
+    this.reportChange?.({
+      toolId: this.id,
+      path: canonicalPath,
+      previousContent: null,
+      newContent: content,
+    });
 
     return {
       content: `Created file ${canonicalPath} (${content.length} characters).`,
@@ -311,10 +326,16 @@ export class EditFileTool implements CodingTool {
 
   private readonly presentDiff: DiffPresenter;
   private readonly fs: WriteFileSystem;
+  private readonly reportChange?: FileChangeReporter;
 
-  public constructor(presentDiff: DiffPresenter, fs: WriteFileSystem = nodeWriteFileSystem) {
+  public constructor(
+    presentDiff: DiffPresenter,
+    fs: WriteFileSystem = nodeWriteFileSystem,
+    reportChange?: FileChangeReporter,
+  ) {
     this.presentDiff = presentDiff;
     this.fs = fs;
+    this.reportChange = reportChange;
   }
 
   public async execute(input: unknown, ctx: ToolContext): Promise<ToolOutput> {
@@ -346,6 +367,15 @@ export class EditFileTool implements CodingTool {
     }
 
     await writeAtomically(this.fs, canonicalPath, content);
+
+    // Report the change so the chat card can offer Show (diff the two versions) and
+    // Undo (restore exactly these previous bytes).
+    this.reportChange?.({
+      toolId: this.id,
+      path: canonicalPath,
+      previousContent: originalContent,
+      newContent: content,
+    });
 
     return {
       content: `Edited file ${canonicalPath} (${content.length} characters).`,

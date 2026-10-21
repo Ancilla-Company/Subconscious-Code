@@ -125,7 +125,7 @@ function firstHardCodedColor(source: string): string | undefined {
 
 describe("view registration & styling smoke", () => {
   describe("registration (Requirements 7.1, 8.1)", () => {
-    it("contributes the chat and settings webview views under the `subconscious` container", () => {
+    it("contributes the chat webview view (and no sidebar settings view)", () => {
       const pkg = readPackageJson();
       const views = pkg.contributes.views.subconscious;
       assert.ok(Array.isArray(views), "expected a `subconscious` views container");
@@ -136,9 +136,10 @@ describe("view registration & styling smoke", () => {
       assert.ok(chat, "expected a `subconscious.chat` view contribution");
       assert.strictEqual(chat.type, "webview");
 
-      const settings = byId.get("subconscious.settings");
-      assert.ok(settings, "expected a `subconscious.settings` view contribution");
-      assert.strictEqual(settings.type, "webview");
+      assert.ok(
+        !byId.has("subconscious.settings"),
+        "settings open in the editor area, not as a sidebar view",
+      );
     });
 
     it("no longer contributes a sidebar tools view (relocated to the editor-area page)", () => {
@@ -159,12 +160,12 @@ describe("view registration & styling smoke", () => {
       );
     });
 
-    it("declares the settings view id that matches the provider class' viewType", () => {
+    it("opens settings as an editor-area page through `subconscious.openSettings`", () => {
       const pkg = readPackageJson();
-      const ids = new Set(pkg.contributes.views.subconscious.map((v) => v.id));
+      const commands = new Set(pkg.contributes.commands.map((c) => c.command));
 
-      assert.strictEqual(SettingsView.viewType, "subconscious.settings");
-      assert.ok(ids.has(SettingsView.viewType), "package.json missing SettingsView id");
+      assert.strictEqual(SettingsView.viewType, "subconscious.settingsPanel");
+      assert.ok(commands.has("subconscious.openSettings"), "missing openSettings command");
       // The Configure Tools controller drives the editor-area page (no sidebar view).
       assert.strictEqual(typeof ToolsController, "function");
     });

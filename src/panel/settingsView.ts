@@ -31,7 +31,7 @@
 import * as vscode from "vscode";
 
 import type { EngineClient } from "../engine/client";
-import type { ModelConfig } from "../engine/types";
+import type { HiveSnapshot, ModelConfig } from "../engine/types";
 import type { ConfigStore } from "../tools/configStore";
 import type { ToolRegistry } from "../tools/registry";
 import type { ApprovalManager } from "../tools/approvalManager";
@@ -262,10 +262,11 @@ interface WebviewMessage {
  * Follows the `ChatPanel` webview conventions: strict CSP with a per-load nonce,
  * `postMessage` bridge, and the shared `media/main.css` theme-token vocabulary.
  */
-export class SettingsView implements vscode.WebviewViewProvider {
-  public static readonly viewType = "subconscious.settings";
+export class SettingsView {
+  /** Editor-area panel id (settings open as a page, not a sidebar section). */
+  public static readonly viewType = "subconscious.settingsPanel";
 
-  private view?: vscode.WebviewView;
+  private panel?: vscode.WebviewPanel;
   private connected = false;
 
   private readonly client: EngineClient;
@@ -305,23 +306,50 @@ export class SettingsView implements vscode.WebviewViewProvider {
       if (this.connected) {
         void this.loadModels();
       }
+      void this.postAccount();
     };
     this.client.on("status", onStatus);
     this.disposables.push({ dispose: () => this.client.off("status", onStatus) });
   }
 
-  public resolveWebviewView(view: vscode.WebviewView): void {
-    this.view = view;
-    view.webview.options = {
-      enableScripts: true,
-      localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, "media")],
+  /** Open the settings page in the editor area, or reveal it if already open. */
+  public show(): void {
+    if (this.panel !== undefined) {
+      this.panel.reveal(this.panel.viewColumn ?? vscode.ViewColumn.One);
+      return;
+    }
+    const panel = vscode.window.createWebviewPanel(
+      SettingsView.viewType,
+      "Subconscious Settings",
+      vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One,
+      {
+        enableScripts: true,
+        retainContextWhenHidden: true,
+        localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, "media")],
+      }
+    );
+    this.panel = panel;
+    // Separate light/dark icons so the tab icon stays visible in every theme.
+    panel.iconPath = {
+      light: vscode.Uri.joinPath(this.extensionUri, "media", "icon-settings-light.svg"),
+      dark: vscode.Uri.joinPath(this.extensionUri, "media", "icon-settings-dark.svg"),
     };
-    view.webview.html = this.html(view.webview);
-    view.webview.onDidReceiveMessage((msg: WebviewMessage) => this.onWebviewMessage(msg));
-    view.onDidDispose(() => this.dispose(), undefined, this.disposables);
+    panel.webview.html = this.html(panel.webview);
+    panel.webview.onDidReceiveMessage(
+      (msg: WebviewMessage) => this.onWebviewMessage(msg),
+      undefined,
+      this.disposables
+    );
+    // Closing the page only drops the panel; the collaborators wired in the
+    // constructor (model provider, registry listener) live as long as the extension.
+    panel.onDidDispose(() => {
+      this.panel = undefined;
+    });
   }
 
   public dispose(): void {
+    this.panel?.dispose();
+    this.panel = undefined;
     for (const disposable of this.disposables.splice(0)) {
       disposable.dispose();
     }
@@ -336,6 +364,16 @@ export class SettingsView implements vscode.WebviewViewProvider {
           this.postProfile();
           this.post({ type: "status", connected: this.connected });
           await this.loadModels();
+          await this.postAccount();
+          break;
+        case "refreshAccount":
+          await this.postAccount(msg.reconnect === true);
+          break;
+        case "login":
+          await this.login(msg.email, msg.password);
+          break;
+        case "logout":
+          await this.logout();
           break;
         case "setAutonomyMode":
           await this.setAutonomyMode(msg.mode);
@@ -359,6 +397,64 @@ export class SettingsView implements vscode.WebviewViewProvider {
     } catch (err) {
       this.post({ type: "error", message: errorMessage(err) });
     }
+  }
+
+  // ── Account and server ──────────────────────────────────────────────────────
+  // The engine owns the server session (sign-in, hive membership, presence); this
+  // page only shows it and lets the user sign the engine in or out.
+
+  /** Read the engine's account/hive state and push it; failures degrade to a note. */
+  private async postAccount(reconnect = false): Promise<void> {
+    if (!this.connected) {
+      this.post({ type: "account", available: false, engineVersion: null });
+      return;
+    }
+    try {
+      const session = await this.client.getAccountSession();
+      let hive: HiveSnapshot | undefined;
+      try {
+        hive = reconnect ? await this.client.refreshHive() : await this.client.getHiveSnapshot();
+      } catch {
+        hive = undefined; // older engines have no hive routes
+      }
+      this.post({
+        type: "account",
+        available: true,
+        engineVersion: this.client.engineVersion ?? null,
+        authenticated: session.authenticated,
+        email: session.user?.email ?? null,
+        displayName: session.user?.display_name ?? null,
+        hive: hive ?? null,
+      });
+    } catch (err) {
+      this.post({ type: "account", available: false, engineVersion: null, error: errorMessage(err) });
+    }
+  }
+
+  private async login(rawEmail: unknown, rawPassword: unknown): Promise<void> {
+    const email = typeof rawEmail === "string" ? rawEmail.trim() : "";
+    const password = typeof rawPassword === "string" ? rawPassword : "";
+    if (!email || !password) {
+      this.post({ type: "accountError", message: "Enter your email and password." });
+      return;
+    }
+    try {
+      await this.client.login(email, password, "VS Code");
+    } catch (err) {
+      this.post({ type: "accountError", message: errorMessage(err) });
+      return;
+    }
+    await this.postAccount(true);
+  }
+
+  private async logout(): Promise<void> {
+    try {
+      await this.client.logout();
+    } catch (err) {
+      this.post({ type: "accountError", message: errorMessage(err) });
+      return;
+    }
+    await this.postAccount();
   }
 
   /** Persist the autonomy mode and apply it before the next approval decision (R8.2). */
@@ -491,7 +587,7 @@ export class SettingsView implements vscode.WebviewViewProvider {
   }
 
   private post(msg: Record<string, unknown>): void {
-    this.view?.webview.postMessage(msg);
+    void this.panel?.webview.postMessage(msg);
   }
 
   // ── HTML ──────────────────────────────────────────────────────────────────
@@ -521,6 +617,25 @@ export class SettingsView implements vscode.WebviewViewProvider {
 <body class="settings">
   <div id="conn" class="settings-banner" hidden>Disconnected — reconnecting…</div>
   <div id="config-error" class="settings-banner error" hidden>Saved configuration could not be loaded; defaults applied.</div>
+
+  <section class="settings-section">
+    <h2 class="settings-title">Account and server</h2>
+    <div class="settings-hint">The engine keeps the server session; sign in here to link it to your account.</div>
+    <div id="acct-status" class="settings-hint">Checking…</div>
+    <div id="acct-error" class="settings-notice" hidden></div>
+    <div id="acct-login" hidden>
+      <input id="acct-email" class="settings-input" type="email" placeholder="Email" autocomplete="username" />
+      <input id="acct-password" class="settings-input" type="password" placeholder="Password" autocomplete="current-password" />
+      <div class="settings-row">
+        <button id="acct-signin" class="settings-btn" type="button">Sign in</button>
+      </div>
+    </div>
+    <div id="acct-devices" class="tool-list"></div>
+    <div class="settings-row">
+      <button id="acct-refresh" class="settings-btn secondary" type="button">Refresh and reconnect</button>
+      <button id="acct-signout" class="settings-btn secondary" type="button" hidden>Sign out</button>
+    </div>
+  </section>
 
   <section class="settings-section">
     <h2 class="settings-title">Autonomy</h2>

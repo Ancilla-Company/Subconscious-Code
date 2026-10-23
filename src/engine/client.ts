@@ -93,6 +93,10 @@ export class EngineClient extends EventEmitter {
   };
   private ws?: WebSocket;
   private closing = false;
+  /** Pending auto-reconnect; cancelled by {@link dispose} and by an explicit {@link connect}. */
+  private reconnectTimer?: ReturnType<typeof setTimeout>;
+  /** Sockets closed on purpose by {@link dispose}; their close event never triggers a reconnect. */
+  private readonly retired = new WeakSet<WebSocket>();
 
   /** Attached tool-callback router; inbound `tool.call` frames are dispatched here. */
   private toolHost?: ToolCallRouter;
@@ -131,8 +135,20 @@ export class EngineClient extends EventEmitter {
   /** Discover (and optionally start) the engine, then open the WebSocket. */
   async connect(): Promise<void> {
     this.closing = false;
+    this.clearReconnectTimer();
     this.info = await discoverEngine();
-    await this.openSocket();
+    try {
+      await this.openSocket();
+    } catch (err) {
+      // Two windows share the persisted Client_ID (globalState), so the second window's
+      // hello is rejected as "already in use". A reject already arms a fresh handshake
+      // (no requested id), so retry once right away instead of surfacing an error and
+      // waiting for the 2 s auto-reconnect (live test (b)).
+      if (!this.forceFreshHelloOnNextAttempt || this.closing) {
+        throw err;
+      }
+      await this.openSocket();
+    }
   }
 
   private openSocket(): Promise<void> {
@@ -206,10 +222,22 @@ export class EngineClient extends EventEmitter {
       });
       ws.on("error", (err) => reject(err));
       ws.on("close", () => {
+        // A socket that was replaced by a newer one (dispose() then connect()) must not
+        // report a disconnect or schedule a reconnect: that would open a second, parallel
+        // connection (live test (c)).
+        if (this.ws !== undefined && this.ws !== ws) {
+          return;
+        }
         this.emit("status", "disconnected");
-        if (!this.closing) {
+        // `retired` covers the window between dispose() and the next connect() finishing
+        // discovery (this.ws is unset, closing already false again).
+        if (!this.closing && !this.retired.has(ws)) {
           // Best-effort reconnect after a short delay.
-          setTimeout(() => this.connect().catch(() => undefined), 2000);
+          this.clearReconnectTimer();
+          this.reconnectTimer = setTimeout(() => {
+            this.reconnectTimer = undefined;
+            void this.connect().catch(() => undefined);
+          }, 2000);
         }
       });
     });
@@ -246,8 +274,19 @@ export class EngineClient extends EventEmitter {
     this.send(frame);
   }
 
+  private clearReconnectTimer(): void {
+    if (this.reconnectTimer !== undefined) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
+  }
+
   dispose(): void {
     this.closing = true;
+    this.clearReconnectTimer();
+    if (this.ws !== undefined) {
+      this.retired.add(this.ws);
+    }
     this.registryChangeSub?.dispose();
     this.registryChangeSub = undefined;
     this.ws?.close();

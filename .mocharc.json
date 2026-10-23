@@ -1,6 +1,6 @@
 {
   "spec": ["out/**/*.test.js"],
-  "ignore": ["out/**/*.vscode.test.js"],
+  "ignore": ["out/**/*.vscode.test.js", "out/**/*.live.test.js"],
   "require": ["out/test/setup.js"],
   "reporter": "spec",
   "timeout": 20000,

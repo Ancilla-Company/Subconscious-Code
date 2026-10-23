@@ -69,7 +69,8 @@ function collectTestFiles(dir, acc) {
     } else if (
       entry.isFile() &&
       entry.name.endsWith(".test.js") &&
-      !entry.name.endsWith(".vscode.test.js")
+      !entry.name.endsWith(".vscode.test.js") &&
+      !entry.name.endsWith(".live.test.js")
     ) {
       acc.push(full);
     }

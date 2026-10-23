@@ -175,7 +175,9 @@
     "pretest:unit": "npm run compile",
     "test:unit": "node ./scripts/run-unit-tests.js",
     "pretest:host": "npm run compile",
-    "test:host": "vscode-test"
+    "test:host": "vscode-test",
+    "pretest:live": "npm run compile",
+    "test:live": "mocha --config .mocharc.live.json"
   },
   "dependencies": {
     "highlight.js": "11.11.1",

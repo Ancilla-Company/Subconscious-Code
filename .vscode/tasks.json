@@ -9,12 +9,67 @@
       "label": "npm: compile"
     },
     {
+      // Default build task: the Extension Test Runner (Testing panel) starts this so `out/` is always fresh.
       "type": "npm",
       "script": "watch",
       "problemMatcher": "$tsc-watch",
       "isBackground": true,
-      "group": "build",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
       "label": "npm: watch"
+    },
+    {
+      // Boots the REAL server and engine (sibling repo `subconscious`) and keeps them running.
+      // Ready when it prints LIVE-STACK-READY <path to stack.json>; Ctrl+C / "Live: Stop stack" ends it.
+      "label": "Live: Start stack",
+      "type": "shell",
+      "command": "python ..\\subconscious\\scripts\\live_stack.py --no-webrtc",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "isBackground": true,
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      },
+      "problemMatcher": {
+        "owner": "live-stack",
+        "pattern": {
+          "regexp": "^(ERROR|Traceback).*$",
+          "message": 0
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^starting the server",
+          "endsPattern": "LIVE-STACK-READY"
+        }
+      }
+    },
+    {
+      "label": "Live: Stop stack",
+      "type": "shell",
+      "command": "python ..\\subconscious\\scripts\\live_stack.py --stop",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      // Starts the stack (if not already running) and runs the live mocha suite against it.
+      "label": "Test: Live (Code)",
+      "type": "shell",
+      "command": "npm run test:live",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "SC_LIVE_STACK": "${workspaceFolder}\\..\\subconscious\\build\\live-stack\\stack.json"
+        }
+      },
+      "dependsOn": ["Live: Start stack"],
+      "group": "test",
+      "problemMatcher": []
     }
   ]
 }

@@ -1,0 +1,8 @@
+{
+  "spec": ["out/test/live/**/*.live.test.js"],
+  "reporter": "spec",
+  "timeout": 60000,
+  "color": true,
+  "exit": true
+}
+
